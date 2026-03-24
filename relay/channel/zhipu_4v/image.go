@@ -121,6 +121,11 @@ func zhipu4vImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 
+	jsonResp, errS3 := service.TransformImageResponseBodyToS3IfConfigured(c, info, jsonResp)
+	if errS3 != nil {
+		return nil, errS3
+	}
+
 	service.IOCopyBytesGracefully(c, resp, jsonResp)
 
 	return &dto.Usage{}, nil

@@ -11,7 +11,9 @@ import (
 	"github.com/QuantumNous/new-api/setting/console_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting/s3_image_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -71,6 +73,10 @@ func GetOptions(c *gin.Context) {
 			strings.HasSuffix(k, "Key") ||
 			strings.HasSuffix(k, "secret") ||
 			strings.HasSuffix(k, "api_key") {
+			continue
+		}
+		// S3 敏感项（access_key_id 不以 Key 结尾，需单独排除）
+		if k == "s3_image_setting.access_key_id" {
 			continue
 		}
 		options = append(options, &model.Option{
@@ -296,15 +302,44 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case "s3_image_setting.enabled":
+		if option.Value == "true" && !service.S3MergedConfigComplete(nil) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "无法启用：S3 配置不完整。请填写 bucket、region、endpoint、access_key_id、secret、cdn（或通过环境变量 S3_* 提供），再开启。",
+			})
+			return
+		}
 	}
 	err = model.UpdateOption(option.Key, option.Value.(string))
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	if strings.HasPrefix(option.Key, "s3_image_setting.") && option.Key != "s3_image_setting.enabled" {
+		if err := validateS3ImageSettingAfterUpdate(); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": err.Error(),
+			})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 	})
 	return
+}
+
+// validateS3ImageSettingAfterUpdate 在已写入 DB 且内存已更新后，若当前为启用但合并配置不完整则回滚 enabled
+func validateS3ImageSettingAfterUpdate() error {
+	if !s3_image_setting.GetS3ImageSetting().Enabled {
+		return nil
+	}
+	if service.S3MergedConfigComplete(nil) {
+		return nil
+	}
+	_ = model.UpdateOption("s3_image_setting.enabled", "false")
+	return fmt.Errorf("S3 配置不完整，已自动关闭「启用系统级 S3 上传」。请补全 bucket、region、endpoint、access_key_id、secret、cdn（或环境变量）后再开启")
 }

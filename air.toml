@@ -1,0 +1,43 @@
+# air.toml - Air Hot Reload Configuration
+
+[build]
+  bin = "./tmp/main.exe"
+  cmd = "go build -o ./tmp/main.exe ."
+  delay = 1000
+  exclude_dir = ["assets", "tmp", "vendor", "web/node_modules", "node_modules", "data", ".git", ".cache", "web/dist"]
+  exclude_regex = ["_test.go"]
+  exclude_unchanged = false
+  follow_symlink = false
+  full_bin = ""
+  include_ext = ["go", "tpl", "tmpl", "html", "env"]
+  kill_delay = "0s"
+  log = "build-errors.log"
+  poll = false
+  poll_interval = 0
+  rerun = false
+  rerun_delay = 500
+  send_interrupt = false
+  stop_on_error = false
+
+[log]
+  main_only = false
+  time = false
+
+[misc]
+  clean_on_exit = false
+
+[proxy]
+  app_port = 3000
+  enabled = false
+  proxy_port = 0
+
+[redir]
+  enabled = false
+  port = 0
+
+[run]
+  args = []
+  env = ["GOPROXY=https://goproxy.cn,direct"]
+  exec = ""
+  log_bin = ""
+  log_prefix = "app"

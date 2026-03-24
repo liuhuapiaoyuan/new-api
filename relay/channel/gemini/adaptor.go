@@ -20,6 +20,18 @@ import (
 	"github.com/samber/lo"
 )
 
+// IsGeminiImagenImageResponse 判断是否为 Imagen 出图响应（含 URL 中含 imagen 的 :predict）。
+func IsGeminiImagenImageResponse(info *relaycommon.RelayInfo) bool {
+	if info == nil {
+		return false
+	}
+	if strings.HasPrefix(info.UpstreamModelName, "imagen") {
+		return true
+	}
+	p := strings.ToLower(info.RequestURLPath)
+	return strings.Contains(info.RequestURLPath, ":predict") && strings.Contains(p, "imagen")
+}
+
 type Adaptor struct {
 }
 
@@ -252,6 +264,10 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			strings.Contains(info.RequestURLPath, ":batchEmbedContents") {
 			return NativeGeminiEmbeddingHandler(c, resp, info)
 		}
+		// /v1beta/models/... 的 RelayMode 恒为 Gemini；Imagen :predict 必须走 GeminiImageHandler，否则会走文本路径且不会 S3 上传。
+		if IsGeminiImagenImageResponse(info) {
+			return GeminiImageHandler(c, info, resp)
+		}
 		if info.IsStream {
 			return GeminiTextGenerationStreamHandler(c, info, resp)
 		} else {
@@ -259,7 +275,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		}
 	}
 
-	if strings.HasPrefix(info.UpstreamModelName, "imagen") {
+	if IsGeminiImagenImageResponse(info) {
 		return GeminiImageHandler(c, info, resp)
 	}
 

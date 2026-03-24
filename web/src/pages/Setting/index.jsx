@@ -34,6 +34,7 @@ import {
   CreditCard,
   Server,
   Activity,
+  CloudUpload,
 } from 'lucide-react';
 
 import SystemSetting from '../../components/settings/SystemSetting';
@@ -49,6 +50,7 @@ import DrawingSetting from '../../components/settings/DrawingSetting';
 import PaymentSetting from '../../components/settings/PaymentSetting';
 import ModelDeploymentSetting from '../../components/settings/ModelDeploymentSetting';
 import PerformanceSetting from '../../components/settings/PerformanceSetting';
+import S3ImageSetting from '../../components/settings/S3ImageSetting';
 
 const Setting = () => {
   const { t } = useTranslation();
@@ -97,6 +99,16 @@ const Setting = () => {
       ),
       content: <DrawingSetting />,
       itemKey: 'drawing',
+    });
+    panes.push({
+      tab: (
+        <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+          <CloudUpload size={18} />
+          {t('s3_image_setting_tab')}
+        </span>
+      ),
+      content: <S3ImageSetting />,
+      itemKey: 's3-image',
     });
     panes.push({
       tab: (

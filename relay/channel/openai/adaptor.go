@@ -455,6 +455,9 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 				if key == "model" {
 					continue
 				}
+				if service.IsS3ImageExtraKey(key) {
+					continue
+				}
 				for _, value := range values {
 					writer.WriteField(key, value)
 				}

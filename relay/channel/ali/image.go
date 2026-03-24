@@ -338,6 +338,10 @@ func aliImageHandler(a *Adaptor, c *gin.Context, resp *http.Response, info *rela
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
+	jsonResponse, errS3 := service.TransformImageResponseBodyToS3IfConfigured(c, info, jsonResponse)
+	if errS3 != nil {
+		return errS3, nil
+	}
 	service.IOCopyBytesGracefully(c, resp, jsonResponse)
 
 	return nil, &dto.Usage{}

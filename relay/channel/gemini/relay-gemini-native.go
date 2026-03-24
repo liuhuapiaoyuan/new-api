@@ -44,6 +44,11 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	// 计算使用量（基于 UsageMetadata）
 	usage := buildUsageFromGeminiMetadata(geminiResponse.UsageMetadata, info.GetEstimatePromptTokens())
 
+	responseBody, errS3 := service.TransformGeminiNativeChatResponseToS3IfConfigured(c, info, responseBody)
+	if errS3 != nil {
+		return nil, errS3
+	}
+
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
 	return &usage, nil

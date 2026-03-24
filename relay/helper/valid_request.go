@@ -1,15 +1,19 @@
 package helper
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/service"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/samber/lo"
@@ -173,6 +177,7 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 				watermark := formData.Get("watermark") == "true"
 				imageRequest.Watermark = &watermark
 			}
+			service.PopulateS3ExtraFromMultipart(imageRequest, formData)
 			break
 		}
 		fallthrough
@@ -307,18 +312,50 @@ func GetAndValidateTextRequest(c *gin.Context, relayMode int) (*dto.GeneralOpenA
 
 func GetAndValidateGeminiRequest(c *gin.Context) (*dto.GeminiChatRequest, error) {
 	request := &dto.GeminiChatRequest{}
-	err := common.UnmarshalBodyReusable(c, request)
+	storage, err := common.GetBodyStorage(c)
 	if err != nil {
 		return nil, err
 	}
+	raw, err := storage.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	stripped, s3Extra, err := service.StripS3KeysFromJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(s3Extra) > 0 {
+		common.SetContextKey(c, constant.ContextKeyRelayS3ImageExtra, s3Extra)
+	}
+	if !bytes.Equal(raw, stripped) {
+		newStorage, cerr := common.CreateBodyStorage(stripped)
+		if cerr != nil {
+			return nil, cerr
+		}
+		c.Set(common.KeyBodyStorage, newStorage)
+		storage = newStorage
+	}
+	if err := common.Unmarshal(stripped, request); err != nil {
+		return nil, err
+	}
 	if len(request.Contents) == 0 && len(request.Requests) == 0 {
-		return nil, errors.New("contents is required")
+		if strings.Contains(c.Request.URL.Path, ":predict") {
+			var probe map[string]json.RawMessage
+			if json.Unmarshal(stripped, &probe) != nil {
+				return nil, errors.New("contents is required")
+			}
+			if _, has := probe["instances"]; !has {
+				return nil, errors.New("contents is required")
+			}
+		} else {
+			return nil, errors.New("contents is required")
+		}
 	}
 
-	//if c.Query("alt") == "sse" {
-	//	relayInfo.IsStream = true
-	//}
-
+	if _, err := storage.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	c.Request.Body = io.NopCloser(storage)
 	return request, nil
 }
 

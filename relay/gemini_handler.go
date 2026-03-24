@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
@@ -136,8 +137,12 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		}
 	}
 
+	imagenNativePredict := strings.HasPrefix(info.UpstreamModelName, "imagen") &&
+		strings.Contains(c.Request.URL.Path, ":predict") &&
+		len(request.Contents) == 0 && len(request.Requests) == 0
+
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled || imagenNativePredict {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -188,7 +193,22 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		}
 	}
 
-	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
+	var usage any
+	var openaiErr *types.NewAPIError
+	// OpenAI 兼容类渠道（APITypeOpenAI / OpenRouter / Xinference 等）转发 Google Gemini 时，上游返回 candidates/predictions 等原生 JSON，
+	// 不能走 openai.Adaptor 的 OpenaiHandler（按聊天 completions 解析）；统一用 gemini.Adaptor 解析响应与 Imagen S3 上传。
+	if info.RelayMode == relayconstant.RelayModeGemini && info.RelayFormat == types.RelayFormatGemini {
+		switch info.ApiType {
+		case constant.APITypeGemini, constant.APITypeVertexAi:
+			usage, openaiErr = adaptor.DoResponse(c, resp.(*http.Response), info)
+		default:
+			geminiAdaptor := &gemini.Adaptor{}
+			geminiAdaptor.Init(info)
+			usage, openaiErr = geminiAdaptor.DoResponse(c, resp.(*http.Response), info)
+		}
+	} else {
+		usage, openaiErr = adaptor.DoResponse(c, resp.(*http.Response), info)
+	}
 	if openaiErr != nil {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
 		return openaiErr

@@ -155,6 +155,9 @@ type RelayInfo struct {
 
 	Request dto.Request
 
+	// S3ImageExtra is populated from stripped S3_* keys in Gemini JSON (e.g. :predict); merged with ImageRequest.Extra for uploads.
+	S3ImageExtra map[string]json.RawMessage
+
 	// RequestConversionChain records request format conversions in order, e.g.
 	// ["openai", "openai_responses"] or ["openai", "claude"].
 	RequestConversionChain []types.RelayFormat
@@ -397,6 +400,10 @@ func GenRelayInfoGemini(c *gin.Context, request dto.Request) *RelayInfo {
 	info := genBaseRelayInfo(c, request)
 	info.RelayFormat = types.RelayFormatGemini
 	info.ShouldIncludeUsage = false
+
+	if extra, ok := common.GetContextKeyType[map[string]json.RawMessage](c, constant.ContextKeyRelayS3ImageExtra); ok && len(extra) > 0 {
+		info.S3ImageExtra = extra
+	}
 
 	return info
 }

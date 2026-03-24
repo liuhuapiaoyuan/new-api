@@ -386,9 +386,12 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			return claudeAdaptor.DoResponse(c, resp, info)
 		case RequestModeGemini:
 			if info.RelayMode == constant.RelayModeGemini {
+				if gemini.IsGeminiImagenImageResponse(info) {
+					return gemini.GeminiImageHandler(c, info, resp)
+				}
 				return gemini.GeminiTextGenerationHandler(c, info, resp)
 			} else {
-				if strings.HasPrefix(info.UpstreamModelName, "imagen") {
+				if gemini.IsGeminiImagenImageResponse(info) {
 					return gemini.GeminiImageHandler(c, info, resp)
 				}
 				return gemini.GeminiChatHandler(c, info, resp)

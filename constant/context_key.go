@@ -65,4 +65,7 @@ const (
 
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage ContextKey = "language"
+
+	// ContextKeyRelayS3ImageExtra holds S3_* stripped from Gemini JSON body (map[string]json.RawMessage).
+	ContextKeyRelayS3ImageExtra ContextKey = "relay_s3_image_extra"
 )

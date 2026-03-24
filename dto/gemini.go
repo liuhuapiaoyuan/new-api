@@ -206,8 +206,11 @@ func (c *GeminiThinkingConfig) SetThinkingBudget(budget int) {
 }
 
 type GeminiInlineData struct {
-	MimeType string `json:"mimeType"`
-	Data     string `json:"data"`
+	MimeType string `json:"mimeType,omitempty"`
+	// Data 出图后经网关上传 S3 则省略该字段，仅保留 Url，避免响应中出现大块 base64。
+	Data string `json:"data,omitempty"`
+	// Url 由网关将内联图上传 S3 后写入；官方 API 无此字段。
+	Url string `json:"url,omitempty"`
 }
 
 // UnmarshalJSON custom unmarshaler for GeminiInlineData to support snake_case and camelCase for MimeType
