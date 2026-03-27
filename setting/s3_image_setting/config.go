@@ -4,15 +4,17 @@ import "github.com/QuantumNous/new-api/setting/config"
 
 // S3ImageSetting 控制台 S3 图片存储（与 env S3_* 对应；secret 对应 S3_SECRET_ACCESS_KEY）
 type S3ImageSetting struct {
-	Enabled      bool   `json:"enabled"`
-	Bucket       string `json:"bucket"`
-	Region       string `json:"region"`
-	Endpoint     string `json:"endpoint"`
-	AccessKeyId  string `json:"access_key_id"`
-	Secret       string `json:"secret"`
-	Cdn          string `json:"cdn"`
+	Enabled     bool   `json:"enabled"`
+	Bucket      string `json:"bucket"`
+	Region      string `json:"region"`
+	Endpoint    string `json:"endpoint"`
+	AccessKeyId string `json:"access_key_id"`
+	Secret      string `json:"secret"`
+	Cdn         string `json:"cdn"`
 	// Dir 可选对象键前缀（子目录），与请求 S3_DIR / 环境变量 S3_DIR 合并时请求优先。
 	Dir string `json:"dir"`
+	// AddressingStyle 上传寻址：auto（默认，按 endpoint 推断）、path（路径式 endpoint/bucket/key）、virtual（虚拟主机 bucket.endpoint/key）。可与请求 S3_ADDRESSING_STYLE、环境变量 S3_ADDRESSING_STYLE / S3_USE_PATH_STYLE 覆盖。
+	AddressingStyle string `json:"addressing_style"`
 }
 
 var defaultS3ImageSetting = S3ImageSetting{}

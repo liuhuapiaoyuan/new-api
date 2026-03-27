@@ -7,18 +7,19 @@ published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 */
 
-import React, { useEffect, useState } from 'react';
 import {
-  Button,
-  Card,
-  Spin,
-  Banner,
-  Switch,
-  Input,
-  Typography,
+    Banner,
+    Button,
+    Card,
+    Input,
+    Select,
+    Spin,
+    Switch,
+    Typography,
 } from '@douyinfe/semi-ui';
-import { API, showError, showSuccess, toBoolean } from '../../helpers';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { API, showError, showSuccess, toBoolean } from '../../helpers';
 
 const { Text } = Typography;
 
@@ -31,12 +32,19 @@ const initialKeys = [
   's3_image_setting.secret',
   's3_image_setting.cdn',
   's3_image_setting.dir',
+  's3_image_setting.addressing_style',
 ];
 
 function emptyState() {
   const o = {};
   initialKeys.forEach((k) => {
-    o[k] = k === 's3_image_setting.enabled' ? false : '';
+    if (k === 's3_image_setting.enabled') {
+      o[k] = false;
+    } else if (k === 's3_image_setting.addressing_style') {
+      o[k] = 'auto';
+    } else {
+      o[k] = '';
+    }
   });
   return o;
 }
@@ -62,6 +70,9 @@ const S3ImageSetting = () => {
       if (!initialKeys.includes(item.key)) return;
       if (item.key === 's3_image_setting.enabled') {
         next[item.key] = toBoolean(item.value);
+      } else if (item.key === 's3_image_setting.addressing_style') {
+        const v = item.value ?? '';
+        next[item.key] = v === '' ? 'auto' : v;
       } else {
         next[item.key] = item.value ?? '';
       }
@@ -176,6 +187,32 @@ const S3ImageSetting = () => {
           <Input
             value={inputs['s3_image_setting.endpoint']}
             onChange={(v) => setField('s3_image_setting.endpoint', v)}
+          />
+        </div>
+        <div style={rowStyle}>
+          <Text strong style={labelStyle}>
+            {t('s3_image_setting_addressing')}
+          </Text>
+          <Select
+            style={{ width: '100%' }}
+            value={inputs['s3_image_setting.addressing_style']}
+            onChange={(v) =>
+              setField('s3_image_setting.addressing_style', v ?? 'auto')
+            }
+            optionList={[
+              {
+                label: t('s3_image_setting_addressing_auto'),
+                value: 'auto',
+              },
+              {
+                label: t('s3_image_setting_addressing_path'),
+                value: 'path',
+              },
+              {
+                label: t('s3_image_setting_addressing_virtual'),
+                value: 'virtual',
+              },
+            ]}
           />
         </div>
         <div style={rowStyle}>

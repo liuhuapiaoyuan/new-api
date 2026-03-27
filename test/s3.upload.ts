@@ -1,7 +1,13 @@
 /**
  * Bun: `bun run test/s3.upload.ts`
+ *
  * 在项目根 `.env` 设置 `BEARER_TOKEN`；可选 `S3_DIR`（默认 `test-gemini`）校验返回 URL 路径含该目录前缀。
  * PowerShell: `$env:BEARER_TOKEN='sk-...'; bun run test/s3.upload.ts`
+ *
+ * S3 参数可与 JSON body 顶层键同名注入，也可仅用 HTTP Header（与 body 键语义一致）：
+ * 支持 `S3-Bucket-Name`（连字符）或 `S3_BUCKET_NAME`（下划线），大小写不敏感。
+ * 合并规则：body / Gemini 剥离结果优先，Header 只补缺；凭据放 Header 可避免出现在日志/代理 body 缓存里。
+ * 本脚本默认走 Header 注入，body 仅含 `contents`，用于验证 Gemini predict 路径下的 header 合并。
  */
 
 declare const Bun: { env: Record<string, string | undefined> };
@@ -97,14 +103,18 @@ async function main() {
   const cdnBase = (Bun.env.S3_CDN ?? "https://cdn.kedao.ggss.club/").replace(/\/$/, "");
   const s3Dir = Bun.env.S3_DIR ?? "test-gemini";
 
+  /** 与网关 s3StripKeys 一致；用连字符形式更符合常见 HTTP 代理行为 */
+  const s3HeaderPairs: [string, string][] = [
+    ["S3-Dir", s3Dir],
+    ["S3-Bucket-Name", Bun.env.S3_BUCKET_NAME ?? "gegeshushu"],
+    ["S3-Region", Bun.env.S3_REGION ?? "cn-south-1"],
+    ["S3-Endpoint", Bun.env.S3_ENDPOINT ?? "https://s3.cn-south-1.qiniucs.com"],
+    ["S3-Access-Key-Id", Bun.env.S3_ACCESS_KEY_ID ?? ""],
+    ["S3-Secret-Access-Key", Bun.env.S3_SECRET_ACCESS_KEY ?? ""],
+    ["S3-Cdn", Bun.env.S3_CDN ?? "https://cdn.kedao.ggss.club/"],
+  ];
+
   const body: Record<string, unknown> = {
-    S3_DIR: s3Dir,
-    S3_BUCKET_NAME: Bun.env.S3_BUCKET_NAME ?? "gegeshushu",
-    S3_REGION: Bun.env.S3_REGION ?? "cn-south-1",
-    S3_ENDPOINT: Bun.env.S3_ENDPOINT ?? "https://s3.cn-south-1.qiniucs.com",
-    S3_ACCESS_KEY_ID: Bun.env.S3_ACCESS_KEY_ID ?? "",
-    S3_SECRET_ACCESS_KEY: Bun.env.S3_SECRET_ACCESS_KEY ?? "",
-    S3_CDN: Bun.env.S3_CDN ?? "https://cdn.kedao.ggss.club/",
     contents: [
       {
         parts: [
@@ -122,18 +132,25 @@ async function main() {
     process.exit(1);
   }
 
+  const reqHeaders: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+  for (const [k, v] of s3HeaderPairs) {
+    if (v !== "") {
+      reqHeaders[k] = v;
+    }
+  }
+
   const res = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers: reqHeaders,
     body: JSON.stringify(body),
   });
 
   const text = await res.text();
   console.log("HTTP", res.status, res.statusText);
-  console.log("S3_DIR (request):", s3Dir);
+  console.log("S3_DIR (request header S3-Dir):", s3Dir);
 
   if (!res.ok) {
     console.error(text.slice(0, 2000));

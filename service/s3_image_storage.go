@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -23,11 +25,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/google/uuid"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
-// S3ImageConfigKeys 与常见环境变量名一致；仅当请求中出现其中至少一个键时才触发上传（不含 S3_DIR）。
+// S3ImageConfigKeys 与常见环境变量名一致；与 S3_DIR、S3_FLAT_OBJECT_KEY 一并见 clientRequestedS3FromExtra。
 var S3ImageConfigKeys = []string{
 	"S3_BUCKET_NAME",
 	"S3_ACCESS_KEY_ID",
@@ -43,8 +45,86 @@ const S3DirKey = "S3_DIR"
 // S3FlatObjectKeyExtra 为 true 时用 __ 代替路径分隔，对象键为单层路径（部分 CDN 对多级路径回源异常时可缓解）。
 const S3FlatObjectKeyExtra = "S3_FLAT_OBJECT_KEY"
 
+// S3AddressingStyleKey 请求/环境：auto | path | virtual（及别名 path-style、virtual-hosted）。
+const S3AddressingStyleKey = "S3_ADDRESSING_STYLE"
+
+// S3UsePathStyleKey 请求/环境：true/1 为路径式，false/0 为虚拟主机式（与 S3_ADDRESSING_STYLE 二选一即可，请求中以此为先时可单独使用）。
+const S3UsePathStyleKey = "S3_USE_PATH_STYLE"
+
 func s3StripKeys() []string {
-	return append(append(append([]string{}, S3ImageConfigKeys...), S3DirKey), S3FlatObjectKeyExtra)
+	return append(append(append(append([]string{}, S3ImageConfigKeys...), S3DirKey), S3FlatObjectKeyExtra), S3AddressingStyleKey, S3UsePathStyleKey)
+}
+
+// s3StripKeySet 由 s3StripKeys 构建，供 header 名归一化与 O(1) 命中判断。
+var s3StripKeySet = func() map[string]struct{} {
+	ks := s3StripKeys()
+	m := make(map[string]struct{}, len(ks))
+	for _, k := range ks {
+		m[k] = struct{}{}
+	}
+	return m
+}()
+
+// canonicalS3ExtraKeyFromHeaderName 将 HTTP 头名（大小写不敏感，允许 S3-Bucket-Name / S3_BUCKET_NAME）映射为与 body 一致的 canonical 键。
+func canonicalS3ExtraKeyFromHeaderName(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	key := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	_, ok := s3StripKeySet[key]
+	if !ok {
+		return "", false
+	}
+	return key, true
+}
+
+// IsS3ImageExtraHeader 表示该请求头属于 S3 注入参数（含凭据），不应在 header 透传中转发上游。
+func IsS3ImageExtraHeader(name string) bool {
+	_, ok := canonicalS3ExtraKeyFromHeaderName(name)
+	return ok
+}
+
+// s3ExtraFromRequestHeaders 从 HTTP Header 读取与 s3StripKeys 同集的参数；同一 canonical 键多个头字段时按头名字典序取第一个非空值。
+func s3ExtraFromRequestHeaders(c *gin.Context) map[string]json.RawMessage {
+	if c == nil || c.Request == nil {
+		return nil
+	}
+	h := c.Request.Header
+	names := make([]string, 0, len(h))
+	for n := range h {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out map[string]json.RawMessage
+	for _, name := range names {
+		values := h[name]
+		if len(values) == 0 {
+			continue
+		}
+		v := strings.TrimSpace(values[0])
+		if v == "" {
+			continue
+		}
+		canonical, ok := canonicalS3ExtraKeyFromHeaderName(name)
+		if !ok {
+			continue
+		}
+		if out != nil {
+			if _, exists := out[canonical]; exists {
+				continue
+			}
+		}
+		raw, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]json.RawMessage)
+		}
+		out[canonical] = raw
+	}
+	return out
 }
 
 // IsS3ImageExtraKey 用于 multipart 转发上游时过滤字段。
@@ -112,7 +192,7 @@ func StripS3KeysFromJSON(raw []byte) (stripped []byte, extra map[string]json.Raw
 	return stripped, extra, nil
 }
 
-// effectiveS3ImageExtra 合并顺序：ImageRequest.Extra 覆盖 RelayInfo / Gin 上下文的 S3 同名字段（与 mergeS3Field 的「请求优先」一致）。
+// effectiveS3ImageExtra 合并顺序：ImageRequest.Extra 覆盖 RelayInfo / Gin 上下文的 S3 同名字段；HTTP Header 仅补缺（body/上下文优先）。
 func effectiveS3ImageExtra(c *gin.Context, info *relaycommon.RelayInfo, imgReq *dto.ImageRequest) map[string]json.RawMessage {
 	var base map[string]json.RawMessage
 	if info != nil && len(info.S3ImageExtra) > 0 {
@@ -138,6 +218,17 @@ func effectiveS3ImageExtra(c *gin.Context, info *relaycommon.RelayInfo, imgReq *
 			out[k] = v
 		}
 	}
+	if c != nil {
+		fromH := s3ExtraFromRequestHeaders(c)
+		for k, v := range fromH {
+			if out == nil {
+				out = make(map[string]json.RawMessage)
+			}
+			if _, exists := out[k]; !exists {
+				out[k] = v
+			}
+		}
+	}
 	return out
 }
 
@@ -151,6 +242,26 @@ func clientRequestedS3FromExtra(extra map[string]json.RawMessage) bool {
 			if json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
 				return true
 			}
+		}
+	}
+	// 任意 S3_ 显式参数均视为客户端要求走 S3（目录/扁平键等，凭据仍可与后台/环境合并）
+	if raw, ok := extra[S3DirKey]; ok && len(raw) > 0 {
+		var s string
+		if json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	if raw, ok := extra[S3FlatObjectKeyExtra]; ok && len(raw) > 0 {
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			s = strings.TrimSpace(s)
+			if s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "yes") {
+				return true
+			}
+		}
+		var b bool
+		if json.Unmarshal(raw, &b) == nil && b {
+			return true
 		}
 	}
 	return false
@@ -197,28 +308,129 @@ func dbFieldForEnvKey(set *s3_image_setting.S3ImageSetting, envKey string) strin
 }
 
 type s3ImageResolvedConfig struct {
-	Bucket   string
-	Region   string
-	Endpoint string
-	AK       string
-	SK       string
-	CDN      string
+	Bucket       string
+	Region       string
+	Endpoint     string
+	AK           string
+	SK           string
+	CDN          string
+	UsePathStyle bool
 }
 
 func resolveS3ImageConfig(extra map[string]json.RawMessage) (*s3ImageResolvedConfig, error) {
 	set := s3_image_setting.GetS3ImageSetting()
+	endpoint := mergeS3Field(extra, "S3_ENDPOINT", dbFieldForEnvKey(set, "S3_ENDPOINT"))
 	cfg := &s3ImageResolvedConfig{
-		Bucket:   mergeS3Field(extra, "S3_BUCKET_NAME", dbFieldForEnvKey(set, "S3_BUCKET_NAME")),
-		Region:   mergeS3Field(extra, "S3_REGION", dbFieldForEnvKey(set, "S3_REGION")),
-		Endpoint: mergeS3Field(extra, "S3_ENDPOINT", dbFieldForEnvKey(set, "S3_ENDPOINT")),
-		AK:       mergeS3Field(extra, "S3_ACCESS_KEY_ID", dbFieldForEnvKey(set, "S3_ACCESS_KEY_ID")),
-		SK:       mergeS3Field(extra, "S3_SECRET_ACCESS_KEY", dbFieldForEnvKey(set, "S3_SECRET_ACCESS_KEY")),
-		CDN:      mergeS3Field(extra, "S3_CDN", dbFieldForEnvKey(set, "S3_CDN")),
+		Bucket:       mergeS3Field(extra, "S3_BUCKET_NAME", dbFieldForEnvKey(set, "S3_BUCKET_NAME")),
+		Region:       mergeS3Field(extra, "S3_REGION", dbFieldForEnvKey(set, "S3_REGION")),
+		Endpoint:     endpoint,
+		AK:           mergeS3Field(extra, "S3_ACCESS_KEY_ID", dbFieldForEnvKey(set, "S3_ACCESS_KEY_ID")),
+		SK:           mergeS3Field(extra, "S3_SECRET_ACCESS_KEY", dbFieldForEnvKey(set, "S3_SECRET_ACCESS_KEY")),
+		CDN:          mergeS3Field(extra, "S3_CDN", dbFieldForEnvKey(set, "S3_CDN")),
+		UsePathStyle: s3UsePathStyleFromResolvedMode(pickS3AddressingMode(extra), endpoint),
 	}
 	if cfg.Bucket == "" || cfg.Region == "" || cfg.Endpoint == "" || cfg.AK == "" || cfg.SK == "" || cfg.CDN == "" {
 		return nil, fmt.Errorf("incomplete S3 configuration: need S3_BUCKET_NAME, S3_REGION, S3_ENDPOINT, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_CDN (request, console, and/or environment)")
 	}
 	return cfg, nil
+}
+
+func normalizeS3AddressingMode(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	switch s {
+	case "path", "path-style", "pathstyle":
+		return "path"
+	case "virtual", "virtual-hosted", "vhost", "vhoststyle":
+		return "virtual"
+	case "auto", "":
+		return "auto"
+	default:
+		return "auto"
+	}
+}
+
+func s3BoolFromRawJSON(raw json.RawMessage) (v bool, ok bool) {
+	if len(raw) == 0 {
+		return false, false
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return b, true
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		s = strings.TrimSpace(strings.ToLower(s))
+		if s == "1" || s == "true" || s == "yes" {
+			return true, true
+		}
+		if s == "0" || s == "false" || s == "no" {
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// pickS3AddressingMode 返回 auto | path | virtual；优先级：请求 S3_ADDRESSING_STYLE > 请求 S3_USE_PATH_STYLE > 控制台 > 环境变量。
+func pickS3AddressingMode(extra map[string]json.RawMessage) string {
+	if extra != nil {
+		if raw, ok := extra[S3AddressingStyleKey]; ok && len(raw) > 0 {
+			var s string
+			if json.Unmarshal(raw, &s) == nil {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					return normalizeS3AddressingMode(s)
+				}
+			}
+		}
+		if raw, ok := extra[S3UsePathStyleKey]; ok {
+			if usePath, ok2 := s3BoolFromRawJSON(raw); ok2 {
+				if usePath {
+					return "path"
+				}
+				return "virtual"
+			}
+		}
+	}
+	set := s3_image_setting.GetS3ImageSetting()
+	if strings.TrimSpace(set.AddressingStyle) != "" {
+		return normalizeS3AddressingMode(set.AddressingStyle)
+	}
+	if ev := strings.TrimSpace(os.Getenv(S3AddressingStyleKey)); ev != "" {
+		return normalizeS3AddressingMode(ev)
+	}
+	if ev := strings.TrimSpace(os.Getenv(S3UsePathStyleKey)); ev != "" {
+		if b, err := strconv.ParseBool(ev); err == nil {
+			if b {
+				return "path"
+			}
+			return "virtual"
+		}
+	}
+	return "auto"
+}
+
+// defaultUsePathStyleForEndpoint auto 模式下：阿里云 OSS（*.aliyuncs.com）等用虚拟主机 bucket 子域；其余默认路径式（MinIO、七牛 path、多数自建兼容端）。
+func defaultUsePathStyleForEndpoint(endpoint string) bool {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Hostname() == "" {
+		return true
+	}
+	h := strings.ToLower(u.Hostname())
+	if strings.Contains(h, "aliyuncs.com") {
+		return false
+	}
+	return true
+}
+
+func s3UsePathStyleFromResolvedMode(mode, endpoint string) bool {
+	switch mode {
+	case "path":
+		return true
+	case "virtual":
+		return false
+	default:
+		return defaultUsePathStyleForEndpoint(endpoint)
+	}
 }
 
 // S3MergedConfigComplete 用于控制台保存前校验（extra 可为 nil）
@@ -296,7 +508,7 @@ func putObjectToS3(ctx context.Context, cfg *s3ImageResolvedConfig, key string, 
 	}
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
-		o.UsePathStyle = true
+		o.UsePathStyle = cfg.UsePathStyle
 	})
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.Bucket),
@@ -405,16 +617,11 @@ func buildS3ObjectKey(dirPrefix, fileName string, flat bool) string {
 }
 
 func shouldRunS3ImageTransform(extra map[string]json.RawMessage) bool {
-	if clientRequestedS3FromExtra(extra) {
-		return true
-	}
-	if s3_image_setting.GetS3ImageSetting().Enabled {
-		return true
-	}
-	return false
+	// 仅当请求携带 S3_*（含 S3_DIR / S3_FLAT_OBJECT_KEY）时上传；控制台「启用 S3」只用于合并默认凭据，不单独触发同步。
+	return clientRequestedS3FromExtra(extra)
 }
 
-// TransformImageResponseBodyToS3IfConfigured 在以下情况上传并改写为 url：请求含 S3_*（OpenAI 图接口 ImageRequest.Extra 或 Gemini JSON 剥离后的 RelayInfo.S3ImageExtra），或控制台启用系统级 S3；否则返回原 body。
+// TransformImageResponseBodyToS3IfConfigured 在请求含 S3_*（OpenAI 图接口 ImageRequest.Extra 或 Gemini JSON 剥离后的 RelayInfo.S3ImageExtra）时上传并改写为 url；凭据可与控制台/环境合并。无请求侧 S3 参数则返回原 body。
 func TransformImageResponseBodyToS3IfConfigured(c *gin.Context, info *relaycommon.RelayInfo, body []byte) ([]byte, *types.NewAPIError) {
 	if info == nil || len(body) == 0 {
 		return body, nil
@@ -488,7 +695,7 @@ func decodeImageBase64Payload(s string) ([]byte, error) {
 }
 
 // TransformGeminiNativeChatResponseToS3IfConfigured 处理 Gemini 原生 JSON（candidates[].content.parts[].inlineData.data），上传后写入 url 并清空 data。
-// 用于 gemini-*-image*:predict 等走 GeminiTextGenerationHandler 的路径（非 Imagen predictions 格式）。
+// 用于 gemini-*-image*:predict 等走 GeminiTextGenerationHandler 的路径（非 Imagen predictions 格式）。触发条件与 TransformImageResponseBodyToS3IfConfigured 相同（须请求侧 S3_*）。
 func TransformGeminiNativeChatResponseToS3IfConfigured(c *gin.Context, info *relaycommon.RelayInfo, body []byte) ([]byte, *types.NewAPIError) {
 	if info == nil || len(body) == 0 {
 		return body, nil

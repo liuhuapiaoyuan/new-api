@@ -124,6 +124,9 @@ func shouldSkipPassthroughHeader(name string) bool {
 	if _, ok := passthroughSkipHeaderNamesLower[lower]; ok {
 		return true
 	}
+	if service.IsS3ImageExtraHeader(name) {
+		return true
+	}
 	return false
 }
 
