@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -195,6 +196,21 @@ func InitDB() (err error) {
 		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
+		// Startup ping catches unreachable DSN early; optional skip for environments where TCP dial is slow
+		// or verified out-of-band (set SQL_SKIP_STARTUP_PING=true).
+		if common.GetEnvOrDefaultBool("SQL_SKIP_STARTUP_PING", false) {
+			common.SysLog("SQL_SKIP_STARTUP_PING is set: skipping database startup ping")
+		} else {
+			pingTimeout := time.Duration(common.GetEnvOrDefault("SQL_PING_TIMEOUT_SEC", 60)) * time.Second
+			pingCtx, pingCancel := context.WithTimeout(context.Background(), pingTimeout)
+			pingErr := sqlDB.PingContext(pingCtx)
+			pingCancel()
+			if pingErr != nil {
+				return fmt.Errorf("database ping failed (try increasing SQL_PING_TIMEOUT_SEC or set SQL_SKIP_STARTUP_PING=true if the DB is known good): %w", pingErr)
+			}
+			common.SysLog("database connection verified")
+		}
+
 		if !common.IsMasterNode {
 			return nil
 		}
@@ -249,12 +265,17 @@ func InitLogDB() (err error) {
 
 func migrateDB() error {
 	// Migrate price_amount column from float/double to decimal for existing tables
-	migrateSubscriptionPlanPriceAmount()
+	common.SysLog("database migration: pre-migrate subscription_plans.price_amount (if needed)")
+	if err := migrateSubscriptionPlanPriceAmount(); err != nil {
+		return err
+	}
 	// Migrate model_limits column from varchar to text for existing tables
+	common.SysLog("database migration: pre-migrate tokens.model_limits (if needed)")
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
 
+	common.SysLog("database migration: AutoMigrate core tables (may take a while on large MySQL/PostgreSQL DBs)")
 	err := DB.AutoMigrate(
 		&Channel{},
 		&Token{},
@@ -285,14 +306,17 @@ func migrateDB() error {
 		return err
 	}
 	if common.UsingSQLite {
+		common.SysLog("database migration: ensure subscription_plans (SQLite)")
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
 			return err
 		}
 	} else {
+		common.SysLog("database migration: AutoMigrate subscription_plans")
 		if err := DB.AutoMigrate(&SubscriptionPlan{}); err != nil {
 			return err
 		}
 	}
+	common.SysLog("database migration finished")
 	return nil
 }
 
@@ -366,10 +390,12 @@ func migrateDBFast() error {
 }
 
 func migrateLOGDB() error {
+	common.SysLog("database migration (log DB): AutoMigrate logs table")
 	var err error
 	if err = LOG_DB.AutoMigrate(&Log{}); err != nil {
 		return err
 	}
+	common.SysLog("database migration (log DB) finished")
 	return nil
 }
 
@@ -503,63 +529,109 @@ func migrateTokenModelLimitsToText() error {
 }
 
 // migrateSubscriptionPlanPriceAmount migrates price_amount column from float/double to decimal(10,6)
-// This is safe to run multiple times - it checks the column type first
-func migrateSubscriptionPlanPriceAmount() {
+// This is safe to run multiple times - it checks the column type first.
+// Uses information_schema only (not GORM Migrator) to avoid heavy catalog locks on PostgreSQL at startup.
+func migrateSubscriptionPlanPriceAmount() error {
 	// SQLite doesn't support ALTER COLUMN, and its type affinity handles this automatically
-	// Skip early to avoid GORM parsing the existing table DDL which may cause issues
 	if common.UsingSQLite {
-		return
+		return nil
 	}
 
-	tableName := "subscription_plans"
-	columnName := "price_amount"
+	const tableName = "subscription_plans"
+	const columnName = "price_amount"
 
-	// Check if table exists first
-	if !DB.Migrator().HasTable(tableName) {
-		return
-	}
+	metaTimeout := time.Duration(common.GetEnvOrDefault("SQL_MIGRATION_META_TIMEOUT_SEC", 45)) * time.Second
+	alterTimeout := time.Duration(common.GetEnvOrDefault("SQL_MIGRATION_ALTER_TIMEOUT_SEC", 300)) * time.Second
 
-	// Check if column exists
-	if !DB.Migrator().HasColumn(&SubscriptionPlan{}, columnName) {
-		return
-	}
-
-	var alterSQL string
-	if common.UsingPostgreSQL {
-		// PostgreSQL: Check if already decimal/numeric
-		var dataType string
-		if err := DB.Raw(`SELECT data_type FROM information_schema.columns
+	readPGType := func(ctx context.Context) (string, bool, error) {
+		rows, err := DB.WithContext(ctx).Raw(`SELECT data_type FROM information_schema.columns
 			WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`,
-			tableName, columnName).Scan(&dataType).Error; err != nil {
-			common.SysLog(fmt.Sprintf("Warning: failed to query metadata for %s.%s: %v", tableName, columnName, err))
-		} else if dataType == "numeric" {
-			return // Already decimal/numeric
+			tableName, columnName).Rows()
+		if err != nil {
+			return "", false, err
 		}
-		alterSQL = fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s TYPE decimal(10,6) USING %s::decimal(10,6)`,
-			tableName, columnName, columnName)
-	} else if common.UsingMySQL {
-		// MySQL: Check if already decimal
-		var columnType string
-		if err := DB.Raw(`SELECT COLUMN_TYPE FROM information_schema.columns
-				WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
-			tableName, columnName).Scan(&columnType).Error; err != nil {
-			common.SysLog(fmt.Sprintf("Warning: failed to query metadata for %s.%s: %v", tableName, columnName, err))
-		} else if strings.HasPrefix(strings.ToLower(columnType), "decimal") {
-			return // Already decimal
+		defer rows.Close()
+		if !rows.Next() {
+			return "", false, nil
 		}
-		alterSQL = fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s decimal(10,6) NOT NULL DEFAULT 0",
-			tableName, columnName)
-	} else {
-		return
+		var dataType string
+		if err := rows.Scan(&dataType); err != nil {
+			return "", false, err
+		}
+		return dataType, true, nil
 	}
 
-	if alterSQL != "" {
-		if err := DB.Exec(alterSQL).Error; err != nil {
+	readMySQLType := func(ctx context.Context) (string, bool, error) {
+		rows, err := DB.WithContext(ctx).Raw(`SELECT COLUMN_TYPE FROM information_schema.columns
+			WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+			tableName, columnName).Rows()
+		if err != nil {
+			return "", false, err
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return "", false, nil
+		}
+		var columnType string
+		if err := rows.Scan(&columnType); err != nil {
+			return "", false, err
+		}
+		return columnType, true, nil
+	}
+
+	if common.UsingPostgreSQL {
+		common.SysLog("database migration: reading column type for subscription_plans.price_amount")
+		metaCtx, cancel := context.WithTimeout(context.Background(), metaTimeout)
+		dataType, ok, err := readPGType(metaCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("%s.%s metadata query: %w", tableName, columnName, err)
+		}
+		if !ok {
+			return nil
+		}
+		if strings.EqualFold(strings.TrimSpace(dataType), "numeric") {
+			return nil
+		}
+		alterSQL := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s TYPE decimal(10,6) USING %s::decimal(10,6)`,
+			tableName, columnName, columnName)
+		common.SysLog(fmt.Sprintf("database migration: converting %s.%s from %s to decimal(10,6)", tableName, columnName, dataType))
+		alterCtx, alterCancel := context.WithTimeout(context.Background(), alterTimeout)
+		defer alterCancel()
+		if err := DB.WithContext(alterCtx).Exec(alterSQL).Error; err != nil {
+			common.SysLog(fmt.Sprintf("Warning: failed to migrate %s.%s to decimal: %v", tableName, columnName, err))
+		} else {
+			common.SysLog(fmt.Sprintf("Successfully migrated %s.%s to decimal(10,6)", tableName, columnName))
+		}
+		return nil
+	}
+
+	if common.UsingMySQL {
+		common.SysLog("database migration: reading column type for subscription_plans.price_amount")
+		metaCtx, cancel := context.WithTimeout(context.Background(), metaTimeout)
+		columnType, ok, err := readMySQLType(metaCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("%s.%s metadata query: %w", tableName, columnName, err)
+		}
+		if !ok {
+			return nil
+		}
+		if strings.HasPrefix(strings.ToLower(columnType), "decimal") {
+			return nil
+		}
+		alterSQL := fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s decimal(10,6) NOT NULL DEFAULT 0",
+			tableName, columnName)
+		common.SysLog(fmt.Sprintf("database migration: converting %s.%s from %s to decimal(10,6)", tableName, columnName, columnType))
+		alterCtx, alterCancel := context.WithTimeout(context.Background(), alterTimeout)
+		defer alterCancel()
+		if err := DB.WithContext(alterCtx).Exec(alterSQL).Error; err != nil {
 			common.SysLog(fmt.Sprintf("Warning: failed to migrate %s.%s to decimal: %v", tableName, columnName, err))
 		} else {
 			common.SysLog(fmt.Sprintf("Successfully migrated %s.%s to decimal(10,6)", tableName, columnName))
 		}
 	}
+	return nil
 }
 
 func closeDB(db *gorm.DB) error {

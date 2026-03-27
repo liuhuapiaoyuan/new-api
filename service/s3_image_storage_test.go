@@ -53,6 +53,56 @@ func TestPickS3AddressingModeEnv(t *testing.T) {
 	}
 }
 
+func TestNormalizeS3EndpointStripDuplicateBucket(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		bucket   string
+		want     string
+	}{
+		{
+			"https://qxerp2025.s3.oss-cn-hangzhou.aliyuncs.com",
+			"qxerp2025",
+			"https://s3.oss-cn-hangzhou.aliyuncs.com",
+		},
+		{
+			"https://qxerp2025.oss-cn-hangzhou.aliyuncs.com",
+			"qxerp2025",
+			"https://oss-cn-hangzhou.aliyuncs.com",
+		},
+		{
+			"https://s3.cn-south-1.qiniucs.com",
+			"mybucket",
+			"https://s3.cn-south-1.qiniucs.com",
+		},
+		{
+			"https://minio.example.com:9000",
+			"mybucket",
+			"https://minio.example.com:9000",
+		},
+		{
+			"https://mybucket.s3.oss-cn-hangzhou.aliyuncs.com:443",
+			"mybucket",
+			"https://s3.oss-cn-hangzhou.aliyuncs.com:443",
+		},
+	}
+	for _, tc := range tests {
+		got := normalizeS3EndpointStripDuplicateBucket(tc.endpoint, tc.bucket)
+		if got != tc.want {
+			t.Errorf("normalizeS3EndpointStripDuplicateBucket(%q, %q) = %q, want %q", tc.endpoint, tc.bucket, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeS3EndpointForPutObject_Kodo(t *testing.T) {
+	const bucket = "kodobucket"
+	in := "https://" + bucket + ".s3.cn-south-1.qiniucs.com"
+	want := "https://s3.cn-south-1.qiniucs.com"
+	got := normalizeS3EndpointForPutObject(in, bucket)
+	if got != want {
+		t.Fatalf("normalizeS3EndpointForPutObject(%q) = %q, want %q", in, got, want)
+	}
+}
+
 func TestS3UsePathStyleFromResolvedMode(t *testing.T) {
 	if !s3UsePathStyleFromResolvedMode("path", "https://oss-cn-hangzhou.aliyuncs.com") {
 		t.Fatal("path mode must force path style")

@@ -116,7 +116,7 @@ async function main() {
     ],
   };
 
-  const token =  "sk-";
+  const token =  Bun.env.BEARER_TOKEN;
   if (!token) {
     console.error("Set BEARER_TOKEN (e.g. in .env or export)");
     process.exit(1);
@@ -128,6 +128,7 @@ async function main() {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
+    
     body: JSON.stringify(body),
   });
 

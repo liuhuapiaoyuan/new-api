@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -468,6 +469,58 @@ func sniffImageContentType(data []byte) string {
 	return "image/png"
 }
 
+// s3SetURLHost 设置 URL 的 host，保留端口（含 IPv6）。
+func s3SetURLHost(u *url.URL, host string) {
+	if u == nil {
+		return
+	}
+	if p := u.Port(); p != "" {
+		u.Host = net.JoinHostPort(host, p)
+	} else {
+		u.Host = host
+	}
+}
+
+// normalizeS3EndpointStripDuplicateBucket 当客户把 bucket 误写入 endpoint 的 host 时，去掉重复的 bucket 段，避免与 PutObject 的 Bucket 叠加。
+// 规则：1) host 以 {bucket}.s3. 开头 → 规范为 s3.{余下}（阿里云/七牛/通用 S3 兼容）；2) *.aliyuncs.com 且 host 以 {bucket}.oss- 开头 → 去掉首段 bucket（OSS 经典虚拟主机式）。
+func normalizeS3EndpointStripDuplicateBucket(endpoint, bucket string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	bucket = strings.TrimSpace(bucket)
+	if endpoint == "" || bucket == "" {
+		return endpoint
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() == "" {
+		return endpoint
+	}
+	host := strings.ToLower(u.Hostname())
+	b := strings.ToLower(bucket)
+
+	prefix := b + ".s3."
+	if strings.HasPrefix(host, prefix) {
+		rest := strings.TrimPrefix(host, prefix)
+		s3SetURLHost(u, "s3."+rest)
+		return u.String()
+	}
+
+	if strings.HasSuffix(host, ".aliyuncs.com") && strings.HasPrefix(host, b+".") {
+		rest := strings.TrimPrefix(host, b+".")
+		if strings.HasPrefix(rest, "oss-") {
+			s3SetURLHost(u, rest)
+			return u.String()
+		}
+	}
+
+	return endpoint
+}
+
+// normalizeS3EndpointForPutObject 上传前归一化 endpoint：去重 bucket host → 七牛 path-style 修正。
+func normalizeS3EndpointForPutObject(endpoint, bucket string) string {
+	ep := normalizeS3EndpointStripDuplicateBucket(endpoint, bucket)
+	ep = normalizeKodoS3EndpointForPathStyle(ep, bucket)
+	return ep
+}
+
 // normalizeKodoS3EndpointForPathStyle 将七牛虚拟主机式 endpoint（<bucket>.s3.<region>.qiniucs.com）
 // 规范为 path-style 使用的 s3.<region>.qiniucs.com，避免与 UsePathStyle+Bucket 组合时对象键错位。
 func normalizeKodoS3EndpointForPathStyle(endpoint, bucket string) string {
@@ -502,7 +555,7 @@ func putObjectToS3(ctx context.Context, cfg *s3ImageResolvedConfig, key string, 
 	if err != nil {
 		return fmt.Errorf("aws config: %w", err)
 	}
-	endpoint := normalizeKodoS3EndpointForPathStyle(cfg.Endpoint, cfg.Bucket)
+	endpoint := normalizeS3EndpointForPutObject(cfg.Endpoint, cfg.Bucket)
 	if endpoint == "" {
 		endpoint = cfg.Endpoint
 	}
