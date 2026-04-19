@@ -3,6 +3,7 @@ package common
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -22,7 +23,32 @@ type HasImage interface {
 	HasImage() bool
 }
 
+func normalizeRequestURLForConcat(requestURL string) string {
+	s := strings.TrimSpace(requestURL)
+	if s == "" {
+		return s
+	}
+	lower := strings.ToLower(s)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u == nil {
+		return s
+	}
+	p := u.Path
+	if p == "" {
+		p = "/"
+	}
+	if u.RawQuery != "" {
+		return p + "?" + u.RawQuery
+	}
+	return p
+}
+
 func GetFullRequestURL(baseURL string, requestURL string, channelType int) string {
+	baseURL = strings.TrimSpace(baseURL)
+	requestURL = normalizeRequestURLForConcat(requestURL)
 	fullRequestURL := fmt.Sprintf("%s%s", baseURL, requestURL)
 
 	if strings.HasPrefix(baseURL, "https://gateway.ai.cloudflare.com") {

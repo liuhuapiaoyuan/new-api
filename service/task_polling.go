@@ -192,7 +192,7 @@ func updateSunoTasks(ctx context.Context, channelId int, taskIds []string, taskM
 		return errors.New("adaptor not found")
 	}
 	proxy := ch.GetSetting().Proxy
-	resp, err := adaptor.FetchTask(*ch.BaseURL, ch.Key, map[string]any{
+	resp, err := adaptor.FetchTask(ch.GetBaseURL(), ch.Key, map[string]any{
 		"ids": taskIds,
 	}, proxy)
 	if err != nil {

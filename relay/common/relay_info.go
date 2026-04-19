@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -420,6 +421,15 @@ func GenRelayInfoOpenAI(c *gin.Context, request dto.Request) *RelayInfo {
 	return info
 }
 
+// relayRequestURLPath returns path, query, and fragment for use after channel base_url (no scheme/host).
+// Unlike (*url.URL).String(), it avoids doubling https:// when the client uses an absolute-form request-target.
+func relayRequestURLPath(u *url.URL) string {
+	if u == nil {
+		return "/"
+	}
+	return u.RequestURI()
+}
+
 func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 
 	//channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
@@ -468,7 +478,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 
 		isFirstResponse: true,
 		RelayMode:       relayconstant.Path2RelayMode(c.Request.URL.Path),
-		RequestURLPath:  c.Request.URL.String(),
+		RequestURLPath:  relayRequestURLPath(c.Request.URL),
 		RequestHeaders:  cloneRequestHeaders(c),
 		IsStream:        isStream,
 

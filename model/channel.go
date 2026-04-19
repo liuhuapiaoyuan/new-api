@@ -424,11 +424,11 @@ func (channel *Channel) GetBaseURL() string {
 	if channel.BaseURL == nil {
 		return ""
 	}
-	url := *channel.BaseURL
-	if url == "" {
-		url = constant.ChannelBaseURLs[channel.Type]
+	s := strings.TrimSpace(*channel.BaseURL)
+	if s == "" {
+		s = strings.TrimSpace(constant.ChannelBaseURLs[channel.Type])
 	}
-	return url
+	return s
 }
 
 func (channel *Channel) GetModelMapping() string {
