@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -51,6 +53,93 @@ func GetUserLogs(c *gin.Context) {
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
 	return
+}
+
+func ExportAdminUsageLogsCSV(c *gin.Context) {
+	logType, _ := strconv.Atoi(c.Query("type"))
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	username := c.Query("username")
+	tokenName := c.Query("token_name")
+	modelName := c.Query("model_name")
+	channel, _ := strconv.Atoi(c.Query("channel"))
+	group := c.Query("group")
+	requestId := c.Query("request_id")
+
+	columns := model.ParseLogExportColumns(true, c.Query("columns"))
+	if len(columns) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "请选择至少一列",
+		})
+		return
+	}
+
+	total, err := model.CountAdminLogsForExport(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if total > model.LogExportMaxRows {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("导出行数超过上限（%d），请缩小时间范围或筛选条件", model.LogExportMaxRows),
+		})
+		return
+	}
+
+	filename := fmt.Sprintf("usage-logs-%s.csv", time.Now().Format("20060102-150405"))
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	err = model.WriteAdminUsageLogsCSV(c.Writer, total, logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, columns)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+}
+
+func ExportUserUsageLogsCSV(c *gin.Context) {
+	userId := c.GetInt("id")
+	logType, _ := strconv.Atoi(c.Query("type"))
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	tokenName := c.Query("token_name")
+	modelName := c.Query("model_name")
+	group := c.Query("group")
+	requestId := c.Query("request_id")
+
+	columns := model.ParseLogExportColumns(false, c.Query("columns"))
+	if len(columns) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "请选择至少一列",
+		})
+		return
+	}
+
+	total, err := model.CountUserLogsForExport(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if total > model.LogExportMaxRows {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("导出行数超过上限（%d），请缩小时间范围或筛选条件", model.LogExportMaxRows),
+		})
+		return
+	}
+
+	filename := fmt.Sprintf("usage-logs-self-%s.csv", time.Now().Format("20060102-150405"))
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	err = model.WriteUserUsageLogsCSV(c.Writer, total, userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, columns)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 }
 
 // Deprecated: SearchAllLogs 已废弃，前端未使用该接口。

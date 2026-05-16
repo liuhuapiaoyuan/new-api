@@ -28,6 +28,7 @@ const LogsFilters = ({
   setFormApi,
   refresh,
   setShowColumnSelector,
+  setShowExportModal,
   formApi,
   setLogType,
   loading,
@@ -175,6 +176,13 @@ const LogsFilters = ({
               size='small'
             >
               {t('重置')}
+            </Button>
+            <Button
+              type='tertiary'
+              onClick={() => setShowExportModal(true)}
+              size='small'
+            >
+              {t('导出')}
             </Button>
             <Button
               type='tertiary'

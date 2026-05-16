@@ -185,6 +185,9 @@ export const useLogsData = () => {
   const [showParamOverrideModal, setShowParamOverrideModal] = useState(false);
   const [paramOverrideTarget, setParamOverrideTarget] = useState(null);
 
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+
   // Initialize default column visibility
   const initDefaultColumns = () => {
     const defaults = getDefaultColumnVisibility();
@@ -771,6 +774,112 @@ export const useLogsData = () => {
     }
   };
 
+  const buildLogExportSearchParams = () => {
+    const {
+      username,
+      token_name,
+      model_name,
+      start_timestamp,
+      end_timestamp,
+      channel,
+      group,
+      request_id,
+      logType: formLogType,
+    } = getFormValues();
+    const currentLogType =
+      formLogType !== undefined ? formLogType : logType;
+    const localStartTimestamp = Date.parse(start_timestamp) / 1000;
+    const localEndTimestamp = Date.parse(end_timestamp) / 1000;
+    const params = new URLSearchParams();
+    params.set('type', String(currentLogType));
+    params.set('token_name', token_name);
+    params.set('model_name', model_name);
+    params.set('start_timestamp', String(localStartTimestamp));
+    params.set('end_timestamp', String(localEndTimestamp));
+    params.set('group', group);
+    params.set('request_id', request_id);
+    if (isAdminUser) {
+      params.set('username', username);
+      params.set(
+        'channel',
+        channel === '' || channel === undefined || channel === null
+          ? ''
+          : String(channel),
+      );
+    }
+    return params;
+  };
+
+  const confirmLogExport = async (columnKeys) => {
+    if (!columnKeys.length) {
+      showError(t('请至少选择一列'));
+      return;
+    }
+    setExportLoading(true);
+    try {
+      const params = buildLogExportSearchParams();
+      params.set('columns', columnKeys.join(','));
+      const path = isAdminUser ? '/api/log/export' : '/api/log/self/export';
+      const res = await API.get(`${path}?${params.toString()}`, {
+        responseType: 'blob',
+        disableDuplicate: true,
+        skipErrorHandler: true,
+      });
+      const blob = res.data;
+      const ctype = (res.headers['content-type'] || '').toLowerCase();
+      if (ctype.includes('application/json') || ctype.includes('text/json')) {
+        const text = await blob.text();
+        let j;
+        try {
+          j = JSON.parse(text);
+        } catch {
+          showError(text || t('导出失败'));
+          return;
+        }
+        if (j.success === false) {
+          showError(j.message || t('导出失败'));
+          return;
+        }
+      }
+      let filename = 'usage-logs.csv';
+      const disposition = res.headers['content-disposition'];
+      if (disposition) {
+        const m =
+          /filename\*=UTF-8''([^;]+)|filename="([^"]+)"|filename=([^;\s]+)/i.exec(
+            disposition,
+          );
+        if (m) {
+          filename = decodeURIComponent((m[1] || m[2] || m[3] || '').trim());
+        }
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showSuccess(t('导出成功'));
+      setShowExportModal(false);
+    } catch (e) {
+      const resp = e?.response;
+      if (resp && resp.data instanceof Blob) {
+        const text = await resp.data.text();
+        try {
+          const j = JSON.parse(text);
+          showError(j.message || t('导出失败'));
+        } catch {
+          showError(t('导出失败'));
+        }
+      } else {
+        showError(e?.message || t('导出失败'));
+      }
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
   // Initialize data
   useEffect(() => {
     const localPageSize =
@@ -846,6 +955,11 @@ export const useLogsData = () => {
     showParamOverrideModal,
     setShowParamOverrideModal,
     paramOverrideTarget,
+
+    showExportModal,
+    setShowExportModal,
+    exportLoading,
+    confirmLogExport,
 
     // Functions
     loadLogs,
