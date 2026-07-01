@@ -227,19 +227,29 @@ func buildClaudeUsageFromOpenAIUsage(oaiUsage *dto.Usage) *dto.ClaudeUsage {
 	if oaiUsage == nil {
 		return nil
 	}
+	cacheCreation5m, cacheCreation1h := NormalizeCacheCreationSplit(
+		oaiUsage.PromptTokensDetails.CachedCreationTokens,
+		oaiUsage.ClaudeCacheCreation5mTokens,
+		oaiUsage.ClaudeCacheCreation1hTokens,
+	)
 	usage := &dto.ClaudeUsage{
 		InputTokens:              oaiUsage.PromptTokens,
 		OutputTokens:             oaiUsage.CompletionTokens,
 		CacheCreationInputTokens: oaiUsage.PromptTokensDetails.CachedCreationTokens,
 		CacheReadInputTokens:     oaiUsage.PromptTokensDetails.CachedTokens,
 	}
-	if oaiUsage.ClaudeCacheCreation5mTokens > 0 || oaiUsage.ClaudeCacheCreation1hTokens > 0 {
+	if cacheCreation5m > 0 || cacheCreation1h > 0 {
 		usage.CacheCreation = &dto.ClaudeCacheCreationUsage{
-			Ephemeral5mInputTokens: oaiUsage.ClaudeCacheCreation5mTokens,
-			Ephemeral1hInputTokens: oaiUsage.ClaudeCacheCreation1hTokens,
+			Ephemeral5mInputTokens: cacheCreation5m,
+			Ephemeral1hInputTokens: cacheCreation1h,
 		}
 	}
 	return usage
+}
+
+func NormalizeCacheCreationSplit(totalTokens int, tokens5m int, tokens1h int) (int, int) {
+	remainder := lo.Max([]int{totalTokens - tokens5m - tokens1h, 0})
+	return tokens5m + remainder, tokens1h
 }
 
 func StreamResponseOpenAI2Claude(openAIResponse *dto.ChatCompletionsStreamResponse, info *relaycommon.RelayInfo) []*dto.ClaudeResponse {
@@ -426,23 +436,28 @@ func StreamResponseOpenAI2Claude(openAIResponse *dto.ChatCompletionsStreamRespon
 	}
 
 	if len(openAIResponse.Choices) == 0 {
-		// no choices
-		// 可能为非标准的 OpenAI 响应，判断是否已经完成
-		if info.ClaudeConvertInfo.Done {
+		// Some OpenAI-compatible upstreams end with a usage-only SSE chunk.
+		oaiUsage := openAIResponse.Usage
+		if oaiUsage == nil {
+			oaiUsage = info.ClaudeConvertInfo.Usage
+		}
+		if oaiUsage != nil {
 			stopOpenBlocks()
-			oaiUsage := info.ClaudeConvertInfo.Usage
-			if oaiUsage != nil {
-				claudeResponses = append(claudeResponses, &dto.ClaudeResponse{
-					Type:  "message_delta",
-					Usage: buildClaudeUsageFromOpenAIUsage(oaiUsage),
-					Delta: &dto.ClaudeMediaMessage{
-						StopReason: common.GetPointer[string](stopReasonOpenAI2Claude(info.FinishReason)),
-					},
-				})
+			stopReason := stopReasonOpenAI2Claude(info.FinishReason)
+			if stopReason == "" {
+				stopReason = "end_turn"
 			}
+			claudeResponses = append(claudeResponses, &dto.ClaudeResponse{
+				Type:  "message_delta",
+				Usage: buildClaudeUsageFromOpenAIUsage(oaiUsage),
+				Delta: &dto.ClaudeMediaMessage{
+					StopReason: common.GetPointer[string](stopReason),
+				},
+			})
 			claudeResponses = append(claudeResponses, &dto.ClaudeResponse{
 				Type: "message_stop",
 			})
+			info.ClaudeConvertInfo.Done = true
 		}
 		return claudeResponses
 	} else {
@@ -450,6 +465,13 @@ func StreamResponseOpenAI2Claude(openAIResponse *dto.ChatCompletionsStreamRespon
 		doneChunk := chosenChoice.FinishReason != nil && *chosenChoice.FinishReason != ""
 		if doneChunk {
 			info.FinishReason = *chosenChoice.FinishReason
+			oaiUsage := openAIResponse.Usage
+			if oaiUsage == nil {
+				oaiUsage = info.ClaudeConvertInfo.Usage
+				// Some upstreams emit finish_reason first, then send a final usage-only chunk.
+				// Defer closing until usage is available so the final message_delta carries it.
+				return claudeResponses
+			}
 		}
 
 		var claudeResponse dto.ClaudeResponse
@@ -593,33 +615,33 @@ func ResponseOpenAI2Claude(openAIResponse *dto.OpenAITextResponse, info *relayco
 	}
 	for _, choice := range openAIResponse.Choices {
 		stopReason = stopReasonOpenAI2Claude(choice.FinishReason)
-		if choice.FinishReason == "tool_calls" {
-			for _, toolUse := range choice.Message.ParseToolCalls() {
-				claudeContent := dto.ClaudeMediaMessage{}
-				claudeContent.Type = "tool_use"
-				claudeContent.Id = toolUse.ID
-				claudeContent.Name = toolUse.Function.Name
-				var mapParams map[string]interface{}
-				if err := common.Unmarshal([]byte(toolUse.Function.Arguments), &mapParams); err == nil {
-					claudeContent.Input = mapParams
-				} else {
-					claudeContent.Input = toolUse.Function.Arguments
-				}
-				contents = append(contents, claudeContent)
-			}
-		} else {
+		textContent := choice.Message.StringContent()
+		toolCalls := choice.Message.ParseToolCalls()
+		if textContent != "" || len(toolCalls) == 0 {
 			claudeContent := dto.ClaudeMediaMessage{}
 			claudeContent.Type = "text"
-			claudeContent.SetText(choice.Message.StringContent())
+			claudeContent.SetText(textContent)
+			contents = append(contents, claudeContent)
+		}
+		for _, toolUse := range toolCalls {
+			claudeContent := dto.ClaudeMediaMessage{}
+			claudeContent.Type = "tool_use"
+			claudeContent.Id = toolUse.ID
+			claudeContent.Name = toolUse.Function.Name
+			mapParams := map[string]interface{}{}
+			if strings.TrimSpace(toolUse.Function.Arguments) != "" {
+				var parsed map[string]interface{}
+				if err := common.Unmarshal([]byte(toolUse.Function.Arguments), &parsed); err == nil && parsed != nil {
+					mapParams = parsed
+				}
+			}
+			claudeContent.Input = mapParams
 			contents = append(contents, claudeContent)
 		}
 	}
 	claudeResponse.Content = contents
 	claudeResponse.StopReason = stopReason
-	claudeResponse.Usage = &dto.ClaudeUsage{
-		InputTokens:  openAIResponse.PromptTokens,
-		OutputTokens: openAIResponse.CompletionTokens,
-	}
+	claudeResponse.Usage = buildClaudeUsageFromOpenAIUsage(&openAIResponse.Usage)
 
 	return claudeResponse
 }
@@ -844,37 +866,32 @@ func ResponseOpenAI2Gemini(openAIResponse *dto.OpenAITextResponse, info *relayco
 			Parts: make([]dto.GeminiPart, 0),
 		}
 
-		// 处理工具调用
-		toolCalls := choice.Message.ParseToolCalls()
-		if len(toolCalls) > 0 {
-			for _, toolCall := range toolCalls {
-				// 解析参数
-				var args map[string]interface{}
-				if toolCall.Function.Arguments != "" {
-					if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
-						args = map[string]interface{}{"arguments": toolCall.Function.Arguments}
-					}
-				} else {
-					args = make(map[string]interface{})
-				}
+		textContent := choice.Message.StringContent()
+		if textContent != "" {
+			part := dto.GeminiPart{
+				Text: textContent,
+			}
+			content.Parts = append(content.Parts, part)
+		}
 
-				part := dto.GeminiPart{
-					FunctionCall: &dto.FunctionCall{
-						FunctionName: toolCall.Function.Name,
-						Arguments:    args,
-					},
+		toolCalls := choice.Message.ParseToolCalls()
+		for _, toolCall := range toolCalls {
+			var args map[string]interface{}
+			if toolCall.Function.Arguments != "" {
+				if err := common.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+					args = map[string]interface{}{"arguments": toolCall.Function.Arguments}
 				}
-				content.Parts = append(content.Parts, part)
+			} else {
+				args = make(map[string]interface{})
 			}
-		} else {
-			// 处理文本内容
-			textContent := choice.Message.StringContent()
-			if textContent != "" {
-				part := dto.GeminiPart{
-					Text: textContent,
-				}
-				content.Parts = append(content.Parts, part)
+
+			part := dto.GeminiPart{
+				FunctionCall: &dto.FunctionCall{
+					FunctionName: toolCall.Function.Name,
+					Arguments:    args,
+				},
 			}
+			content.Parts = append(content.Parts, part)
 		}
 
 		candidate.Content = content

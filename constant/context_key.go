@@ -68,4 +68,11 @@ const (
 
 	// ContextKeyRelayS3ImageExtra holds S3_* stripped from Gemini JSON body (map[string]json.RawMessage).
 	ContextKeyRelayS3ImageExtra ContextKey = "relay_s3_image_extra"
+	ContextKeyIsStream        ContextKey = "is_stream"
+
+	// ContextKeyAuditLogged marks that the current request has already recorded
+	// a manage/operation audit log inside the handler. When set, the admin-audit
+	// fallback in authHelper (finishAdminAudit) skips its record to avoid
+	// duplicate entries.
+	ContextKeyAuditLogged ContextKey = "audit_logged"
 )

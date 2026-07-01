@@ -112,15 +112,18 @@ func ParseLogExportColumns(isAdmin bool, columnsParam string) []string {
 
 // CountAdminLogsForExport counts rows matching admin log filters (no pagination cap).
 func CountAdminLogsForExport(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, requestId string) (int64, error) {
-	tx := buildAdminLogFilterTx(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId)
+	tx, err := buildAdminLogFilterTx(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, "")
+	if err != nil {
+		return 0, err
+	}
 	var total int64
-	err := tx.Model(&Log{}).Count(&total).Error
+	err = tx.Model(&Log{}).Count(&total).Error
 	return total, err
 }
 
 // CountUserLogsForExport counts rows matching self log filters (full count, not capped at logSearchCountLimit).
 func CountUserLogsForExport(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, group string, requestId string) (int64, error) {
-	tx, err := buildUserLogFilterTx(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId)
+	tx, err := buildUserLogFilterTx(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, "")
 	if err != nil {
 		return 0, err
 	}
@@ -155,7 +158,10 @@ func WriteAdminUsageLogsCSV(w io.Writer, total int64, logType int, startTimestam
 
 	var lastID int
 	for {
-		tx := buildAdminLogFilterTx(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId)
+		tx, err := buildAdminLogFilterTx(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, "")
+		if err != nil {
+			return err
+		}
 		if lastID > 0 {
 			tx = tx.Where("logs.id < ?", lastID)
 		}
@@ -213,7 +219,7 @@ func WriteUserUsageLogsCSV(w io.Writer, total int64, userId int, logType int, st
 
 	var lastID int
 	for {
-		tx, err := buildUserLogFilterTx(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId)
+		tx, err := buildUserLogFilterTx(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, "")
 		if err != nil {
 			return err
 		}
