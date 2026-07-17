@@ -26,7 +26,7 @@ echo "Building backend..."
 echo "VERSION=$VERSION"
 export DOCKER_BUILDKIT=1
 
-docker build -f ./docker/Dockerfile  -t $BACK_IMAGE_NAME:latest -t $BACK_IMAGE_NAME:$VERSION .
+docker build -f ./Dockerfile  -t $BACK_IMAGE_NAME:latest -t $BACK_IMAGE_NAME:$VERSION .
  
 echo "Build complete."
 
