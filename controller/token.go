@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -356,4 +358,94 @@ func GetTokenKeysBatch(c *gin.Context) {
 		keysMap[t.Id] = t.GetFullKey()
 	}
 	common.ApiSuccess(c, gin.H{"keys": keysMap})
+}
+
+// ExportTokenUsageLogsCSV exports usage logs for one of the current user's tokens as CSV.
+// Query: start_timestamp, end_timestamp (unix seconds, optional), type (optional), columns (optional).
+func ExportTokenUsageLogsCSV(c *gin.Context) {
+	tokenId, err := strconv.Atoi(c.Param("id"))
+	if err != nil || tokenId <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	userId := c.GetInt("id")
+	token, err := model.GetTokenByIds(tokenId, userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	logType, _ := strconv.Atoi(c.Query("type"))
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	if startTimestamp < 0 || endTimestamp < 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "时间范围无效",
+		})
+		return
+	}
+	if startTimestamp > 0 && endTimestamp > 0 && startTimestamp > endTimestamp {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "开始时间不能晚于结束时间",
+		})
+		return
+	}
+
+	columns := model.ParseLogExportColumns(false, c.Query("columns"))
+	if len(columns) == 0 {
+		columns = model.DefaultUserLogExportColumns()
+	}
+
+	total, err := model.CountTokenLogsForExport(userId, token.Id, logType, startTimestamp, endTimestamp)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if total > model.LogExportMaxRows {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("导出行数超过上限（%d），请缩小时间范围", model.LogExportMaxRows),
+		})
+		return
+	}
+
+	safeName := sanitizeTokenExportFilename(token.Name)
+	filename := fmt.Sprintf("token-%s-usage-%s.csv", safeName, time.Now().Format("20060102-150405"))
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	err = model.WriteTokenUsageLogsCSV(c.Writer, total, userId, token.Id, logType, startTimestamp, endTimestamp, columns)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+}
+
+func sanitizeTokenExportFilename(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "unnamed"
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._")
+	if out == "" {
+		return "unnamed"
+	}
+	if len(out) > 40 {
+		out = out[:40]
+	}
+	return out
 }

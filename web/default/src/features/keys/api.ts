@@ -25,6 +25,7 @@ import type {
   GetApiKeysResponse,
   SearchApiKeysParams,
   ApiKeyFormData,
+  ExportApiKeyUsageParams,
 } from './types'
 
 // ============================================================================
@@ -115,4 +116,109 @@ export async function fetchTokenKeysBatch(ids: number[]): Promise<{
 }> {
   const res = await api.post('/api/token/batch/keys', { ids })
   return res.data
+}
+
+function parseFilenameFromDisposition(header: string | undefined): string | null {
+  if (!header) return null
+  const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1].trim())
+    } catch {
+      return utf8Match[1].trim()
+    }
+  }
+  const plainMatch = /filename="?([^";]+)"?/i.exec(header)
+  return plainMatch?.[1]?.trim() || null
+}
+
+async function readBlobErrorMessage(blob: Blob): Promise<string | null> {
+  try {
+    const text = await blob.text()
+    const json = JSON.parse(text) as { success?: boolean; message?: string }
+    if (json && typeof json.message === 'string' && json.message) {
+      return json.message
+    }
+  } catch {
+    /* not JSON */
+  }
+  return null
+}
+
+async function detectExportError(
+  blob: Blob,
+  contentType: string
+): Promise<string | null> {
+  if (
+    contentType.includes('application/json') ||
+    contentType.includes('text/json') ||
+    blob.type === 'application/json'
+  ) {
+    return (await readBlobErrorMessage(blob)) || 'Export failed'
+  }
+
+  // Backend error JSON may arrive without a JSON content-type through proxies.
+  try {
+    const peek = await blob.slice(0, 16).text()
+    const trimmed = peek.replace(/^\uFEFF/, '').trimStart()
+    if (trimmed.startsWith('{')) {
+      return readBlobErrorMessage(blob)
+    }
+  } catch {
+    /* ignore peek failures */
+  }
+  return null
+}
+
+/** Download a CSV usage report for one API key within a time range. */
+export async function exportApiKeyUsageReport(
+  id: number,
+  params: ExportApiKeyUsageParams
+): Promise<{ success: true } | { success: false; message: string }> {
+  try {
+    const res = await api.get(`/api/token/${id}/export`, {
+      params,
+      responseType: 'blob',
+      skipBusinessError: true,
+      skipErrorHandler: true,
+      disableDuplicate: true,
+    })
+
+    const blob = res.data as Blob
+    const contentType = String(res.headers['content-type'] || '')
+    const errorMessage = await detectExportError(blob, contentType)
+    if (errorMessage) {
+      return { success: false, message: errorMessage }
+    }
+
+    const filename =
+      parseFilenameFromDisposition(
+        res.headers['content-disposition'] as string | undefined
+      ) || `token-${id}-usage.csv`
+
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.rel = 'noopener'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+
+    return { success: true }
+  } catch (error: unknown) {
+    const axiosError = error as {
+      response?: { data?: Blob; status?: number }
+      message?: string
+    }
+    if (axiosError.response?.data instanceof Blob) {
+      const message = await readBlobErrorMessage(axiosError.response.data)
+      if (message) return { success: false, message }
+    }
+    return {
+      success: false,
+      message: axiosError.message || 'Export failed',
+    }
+  }
 }

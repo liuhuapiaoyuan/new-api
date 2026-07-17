@@ -110,6 +110,76 @@ func ParseLogExportColumns(isAdmin bool, columnsParam string) []string {
 	return out
 }
 
+// DefaultUserLogExportColumns returns a copy of the default user-facing export columns.
+func DefaultUserLogExportColumns() []string {
+	out := make([]string, len(logExportColumnsUser))
+	copy(out, logExportColumnsUser)
+	return out
+}
+
+// CountTokenLogsForExport counts logs for a user's token within an optional time/type window.
+func CountTokenLogsForExport(userId int, tokenId int, logType int, startTimestamp int64, endTimestamp int64) (int64, error) {
+	tx := buildTokenLogFilterTx(userId, tokenId, logType, startTimestamp, endTimestamp)
+	var total int64
+	err := tx.Model(&Log{}).Count(&total).Error
+	return total, err
+}
+
+// WriteTokenUsageLogsCSV writes CSV for one token's usage logs. Enforce row limit in the controller first.
+func WriteTokenUsageLogsCSV(w io.Writer, total int64, userId int, tokenId int, logType int, startTimestamp int64, endTimestamp int64, columns []string) error {
+	if len(columns) == 0 {
+		return ErrLogExportNoColumns
+	}
+	if total == 0 {
+		return writeLogsCSVHeaderOnly(w, columns)
+	}
+	if _, err := w.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		return err
+	}
+	cw := csv.NewWriter(w)
+	header := make([]string, len(columns))
+	for i, col := range columns {
+		if h, ok := logExportHeaderZH[col]; ok {
+			header[i] = h
+		} else {
+			header[i] = col
+		}
+	}
+	if err := cw.Write(header); err != nil {
+		return err
+	}
+
+	var lastID int
+	for {
+		tx := buildTokenLogFilterTx(userId, tokenId, logType, startTimestamp, endTimestamp)
+		if lastID > 0 {
+			tx = tx.Where("logs.id < ?", lastID)
+		}
+		var batch []*Log
+		if err := tx.Order("logs.id desc").Limit(LogExportBatchSize).Find(&batch).Error; err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		if err := fillTokenNamesForLogs(batch); err != nil {
+			return err
+		}
+		for _, log := range batch {
+			row := buildLogCSVRow(log, columns, false)
+			if err := cw.Write(row); err != nil {
+				return err
+			}
+		}
+		cw.Flush()
+		if err := cw.Error(); err != nil {
+			return err
+		}
+		lastID = batch[len(batch)-1].Id
+	}
+	return nil
+}
+
 // CountAdminLogsForExport counts rows matching admin log filters (no pagination cap).
 func CountAdminLogsForExport(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, requestId string) (int64, error) {
 	tx, err := buildAdminLogFilterTx(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, "")

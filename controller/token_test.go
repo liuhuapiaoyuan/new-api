@@ -538,3 +538,89 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 		t.Fatalf("unauthorized key response leaked raw token key: %s", unauthorizedRecorder.Body.String())
 	}
 }
+
+func TestExportTokenUsageLogsCSVRequiresOwnershipAndFiltersByTime(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	if err := db.AutoMigrate(&model.Log{}); err != nil {
+		t.Fatalf("failed to migrate logs table: %v", err)
+	}
+
+	token := seedToken(t, db, 1, "export-token", "export1234token5678")
+	otherToken := seedToken(t, db, 2, "other-export-token", "other1234token5678")
+
+	logs := []*model.Log{
+		{
+			UserId: 1, TokenId: token.Id, TokenName: token.Name, Type: model.LogTypeConsume,
+			CreatedAt: 1000, ModelName: "in-range", Quota: 10, PromptTokens: 1, CompletionTokens: 2,
+		},
+		{
+			UserId: 1, TokenId: token.Id, TokenName: token.Name, Type: model.LogTypeConsume,
+			CreatedAt: 3000, ModelName: "out-of-range", Quota: 20, PromptTokens: 3, CompletionTokens: 4,
+		},
+		{
+			UserId: 2, TokenId: otherToken.Id, TokenName: otherToken.Name, Type: model.LogTypeConsume,
+			CreatedAt: 1500, ModelName: "other-user", Quota: 30, PromptTokens: 5, CompletionTokens: 6,
+		},
+	}
+	for _, log := range logs {
+		if err := db.Create(log).Error; err != nil {
+			t.Fatalf("failed to seed log: %v", err)
+		}
+	}
+
+	unauthorizedCtx, unauthorizedRecorder := newAuthenticatedContext(
+		t,
+		http.MethodGet,
+		"/api/token/"+strconv.Itoa(token.Id)+"/export?start_timestamp=500&end_timestamp=2000",
+		nil,
+		2,
+	)
+	unauthorizedCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+	ExportTokenUsageLogsCSV(unauthorizedCtx)
+	unauthorizedResponse := decodeAPIResponse(t, unauthorizedRecorder)
+	if unauthorizedResponse.Success {
+		t.Fatalf("expected export by non-owner to fail")
+	}
+
+	invalidCtx, invalidRecorder := newAuthenticatedContext(
+		t,
+		http.MethodGet,
+		"/api/token/"+strconv.Itoa(token.Id)+"/export?start_timestamp=2000&end_timestamp=1000",
+		nil,
+		1,
+	)
+	invalidCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+	ExportTokenUsageLogsCSV(invalidCtx)
+	invalidResponse := decodeAPIResponse(t, invalidRecorder)
+	if invalidResponse.Success {
+		t.Fatalf("expected invalid time range to fail")
+	}
+	if !strings.Contains(invalidResponse.Message, "开始时间") {
+		t.Fatalf("expected start/end validation message, got %q", invalidResponse.Message)
+	}
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodGet,
+		"/api/token/"+strconv.Itoa(token.Id)+"/export?start_timestamp=500&end_timestamp=2000",
+		nil,
+		1,
+	)
+	ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+	ExportTokenUsageLogsCSV(ctx)
+
+	body := recorder.Body.String()
+	contentType := recorder.Header().Get("Content-Type")
+	if !strings.Contains(contentType, "text/csv") {
+		t.Fatalf("expected csv content type, got %q", contentType)
+	}
+	if !strings.Contains(body, "in-range") {
+		t.Fatalf("expected in-range log row in csv, got: %s", body)
+	}
+	if strings.Contains(body, "out-of-range") {
+		t.Fatalf("expected out-of-range log to be filtered out, got: %s", body)
+	}
+	if strings.Contains(body, "other-user") {
+		t.Fatalf("expected other user's log to be excluded, got: %s", body)
+	}
+}

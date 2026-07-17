@@ -104,3 +104,10 @@ export type ApiKeysDialogType =
   | 'delete'
   | 'batch-delete'
   | 'cc-switch'
+  | 'export'
+
+export interface ExportApiKeyUsageParams {
+  start_timestamp: number
+  end_timestamp: number
+  type?: number
+}

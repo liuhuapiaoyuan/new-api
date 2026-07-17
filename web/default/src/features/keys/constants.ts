@@ -85,6 +85,9 @@ export const ERROR_MESSAGES = {
   DELETE_FAILED: 'Failed to delete API key',
   BATCH_DELETE_FAILED: 'Failed to delete API keys',
   STATUS_UPDATE_FAILED: 'Failed to update API key status',
+  EXPORT_FAILED: 'Failed to export usage report',
+  EXPORT_TIME_REQUIRED: 'Please select a start and end time',
+  EXPORT_TIME_INVALID: 'Start time must be earlier than end time',
 } as const
 
 // ============================================================================
@@ -97,4 +100,23 @@ export const SUCCESS_MESSAGES = {
   API_KEY_DELETED: 'API Key deleted successfully',
   API_KEY_ENABLED: 'API Key enabled successfully',
   API_KEY_DISABLED: 'API Key disabled successfully',
+  EXPORT_STARTED: 'Usage report downloaded',
 } as const
+
+/** Quick presets for the per-key usage report export dialog */
+export const EXPORT_TIME_PRESETS = [
+  { id: 'today', labelKey: 'Today' },
+  { id: '7d', labelKey: '7 Days' },
+  { id: '30d', labelKey: '30 Days' },
+  { id: 'month', labelKey: 'This month' },
+] as const
+
+export type ExportTimePresetId = (typeof EXPORT_TIME_PRESETS)[number]['id']
+
+/** Log types offered in the export dialog (backend type=0 means all) */
+export const EXPORT_LOG_TYPE_OPTIONS = [
+  { value: '0', labelKey: 'All Types' },
+  { value: '2', labelKey: 'Consume' },
+  { value: '5', labelKey: 'Error' },
+  { value: '6', labelKey: 'Refund' },
+] as const

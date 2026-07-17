@@ -27,6 +27,7 @@ import {
   Copy,
   Link,
   Loader2,
+  Download,
 } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -239,6 +240,25 @@ export function DataTableRowActions<TData>({
         <TooltipContent>{t('Edit')}</TooltipContent>
       </Tooltip>
 
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant='ghost'
+              size='icon-sm'
+              onClick={() => {
+                setCurrentRow(apiKey)
+                setOpen('export')
+              }}
+              aria-label={t('Export Report')}
+            />
+          }
+        >
+          <Download />
+        </TooltipTrigger>
+        <TooltipContent>{t('Export Report')}</TooltipContent>
+      </Tooltip>
+
       <DataTableRowActionMenu
         ariaLabel={t('Open menu')}
         contentClassName='w-[200px]'
@@ -273,6 +293,17 @@ export function DataTableRowActions<TData>({
           </DropdownMenuShortcut>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() => {
+            setCurrentRow(apiKey)
+            setOpen('export')
+          }}
+        >
+          {t('Export Report')}
+          <DropdownMenuShortcut>
+            <Download size={16} />
+          </DropdownMenuShortcut>
+        </DropdownMenuItem>
         <DropdownMenuItem
           onClick={async () => {
             const realKey = await resolveRealKey(apiKey.id)

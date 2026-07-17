@@ -18,9 +18,12 @@ trap 'error_handler $LINENO' ERR
 
 
 VERSION=$(date +%Y%m%d%H%M)
+# Keep the VERSION file in sync so Dockerfile embeds the same build id.
+printf '%s' "$VERSION" > VERSION
 BACK_IMAGE_NAME=docker.cnb.cool/qzsyzn/docker/newapi
 # 编译后端
 echo "Building backend..."
+echo "VERSION=$VERSION"
 export DOCKER_BUILDKIT=1
 
 docker build -f ./docker/Dockerfile  -t $BACK_IMAGE_NAME:latest -t $BACK_IMAGE_NAME:$VERSION .
@@ -35,4 +38,4 @@ docker push $BACK_IMAGE_NAME:$VERSION
 
  
 echo "Push complete."
-
+echo "Released $BACK_IMAGE_NAME:$VERSION"

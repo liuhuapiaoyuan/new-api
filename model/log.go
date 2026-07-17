@@ -618,6 +618,23 @@ func buildUserLogFilterTx(userId int, logType int, startTimestamp int64, endTime
 	return tx, nil
 }
 
+// buildTokenLogFilterTx filters logs owned by userId for a specific token_id and optional time/type range.
+func buildTokenLogFilterTx(userId int, tokenId int, logType int, startTimestamp int64, endTimestamp int64) *gorm.DB {
+	var tx *gorm.DB
+	if logType == LogTypeUnknown {
+		tx = LOG_DB.Where("logs.user_id = ? AND logs.token_id = ?", userId, tokenId)
+	} else {
+		tx = LOG_DB.Where("logs.user_id = ? AND logs.token_id = ? AND logs.type = ?", userId, tokenId, logType)
+	}
+	if startTimestamp != 0 {
+		tx = tx.Where("logs.created_at >= ?", startTimestamp)
+	}
+	if endTimestamp != 0 {
+		tx = tx.Where("logs.created_at <= ?", endTimestamp)
+	}
+	return tx
+}
+
 func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
 	tx, err := buildUserLogFilterTx(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, upstreamRequestId)
 	if err != nil {
