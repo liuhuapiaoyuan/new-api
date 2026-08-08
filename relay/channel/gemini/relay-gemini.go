@@ -67,6 +67,52 @@ func isNew25ProModel(modelName string) bool {
 		!strings.HasPrefix(modelName, "gemini-2.5-pro-preview-03-25")
 }
 
+// isGeminiNativeFileURI reports whether uri should be forwarded as Gemini fileData
+// (YouTube / Files API / GCS) instead of being downloaded into inlineData.
+func isGeminiNativeFileURI(uri string) bool {
+	u := strings.TrimSpace(uri)
+	if u == "" {
+		return false
+	}
+	lower := strings.ToLower(u)
+	if strings.HasPrefix(lower, "gs://") {
+		return true
+	}
+	if strings.Contains(lower, "youtube.com/") || strings.Contains(lower, "youtu.be/") {
+		return true
+	}
+	if strings.Contains(lower, "/v1beta/files/") || strings.Contains(lower, "/v1/files/") {
+		return true
+	}
+	if strings.Contains(lower, "generativelanguage.googleapis.com/") && strings.Contains(lower, "/files/") {
+		return true
+	}
+	if strings.Contains(lower, "aiplatform.googleapis.com/") && strings.Contains(lower, "/files/") {
+		return true
+	}
+	return false
+}
+
+func isYouTubeURI(uri string) bool {
+	lower := strings.ToLower(uri)
+	return strings.Contains(lower, "youtube.com/") || strings.Contains(lower, "youtu.be/")
+}
+
+// geminiInlineDataFromSource downloads or decodes source into Gemini inlineData.
+func geminiInlineDataFromSource(c *gin.Context, source types.FileSource, reason string) (*dto.GeminiInlineData, error) {
+	base64Data, mimeType, err := service.GetBase64Data(c, source, reason)
+	if err != nil {
+		return nil, fmt.Errorf("get file data from '%s' failed: %w", source.GetIdentifier(), err)
+	}
+	if _, ok := geminiSupportedMimeTypes[strings.ToLower(mimeType)]; !ok {
+		return nil, fmt.Errorf("mime type is not supported by Gemini: '%s', url: '%s', supported types are: %v", mimeType, source.GetIdentifier(), getSupportedMimeTypesList())
+	}
+	return &dto.GeminiInlineData{
+		MimeType: mimeType,
+		Data:     base64Data,
+	}, nil
+}
+
 func is25FlashLiteModel(modelName string) bool {
 	return strings.HasPrefix(modelName, "gemini-2.5-flash-lite")
 }
@@ -590,21 +636,34 @@ func CovertOpenAI2Gemini(c *gin.Context, textRequest dto.GeneralOpenAIRequest, i
 				if source == nil {
 					continue
 				}
-				base64Data, mimeType, err := service.GetBase64Data(c, source, "formatting image for Gemini")
+
+				// 智能判断：Gemini 原生 URI（YouTube / Files API / GCS）走 fileData，其余 URL/base64 转 inlineData
+				if source.IsURL() {
+					uri := source.GetRawData()
+					if isGeminiNativeFileURI(uri) {
+						mimeType := ""
+						if img := part.GetImageMedia(); img != nil {
+							mimeType = img.MimeType
+						}
+						if mimeType == "" && isYouTubeURI(uri) {
+							mimeType = "video/webm"
+						}
+						parts = append(parts, dto.GeminiPart{
+							FileData: &dto.GeminiFileData{
+								MimeType: mimeType,
+								FileUri:  uri,
+							},
+						})
+						continue
+					}
+				}
+
+				inlineData, err := geminiInlineDataFromSource(c, source, "formatting image for Gemini")
 				if err != nil {
-					return nil, fmt.Errorf("get file data from '%s' failed: %w", source.GetIdentifier(), err)
+					return nil, err
 				}
-
-				// 校验 MimeType 是否在 Gemini 支持的白名单中
-				if _, ok := geminiSupportedMimeTypes[strings.ToLower(mimeType)]; !ok {
-					return nil, fmt.Errorf("mime type is not supported by Gemini: '%s', url: '%s', supported types are: %v", mimeType, source.GetIdentifier(), getSupportedMimeTypesList())
-				}
-
 				parts = append(parts, dto.GeminiPart{
-					InlineData: &dto.GeminiInlineData{
-						MimeType: mimeType,
-						Data:     base64Data,
-					},
+					InlineData: inlineData,
 				})
 			}
 		}

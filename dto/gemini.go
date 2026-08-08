@@ -210,10 +210,17 @@ type GeminiInlineData struct {
 }
 
 func (d *GeminiInlineData) ToFileSource() types.FileSource {
-	if d == nil || d.Data == "" {
+	if d == nil {
 		return nil
 	}
-	return types.NewFileSourceFromData(d.Data, d.MimeType)
+	if d.Data != "" {
+		return types.NewFileSourceFromData(d.Data, d.MimeType)
+	}
+	// 网关 S3 转换后可能只保留 url（非官方字段），请求回传时需按 URL 再加载
+	if d.Url != "" {
+		return types.NewFileSourceFromData(d.Url, d.MimeType)
+	}
+	return nil
 }
 
 // UnmarshalJSON custom unmarshaler for GeminiInlineData to support snake_case and camelCase for MimeType
@@ -269,6 +276,31 @@ type GeminiFileData struct {
 	FileUri  string `json:"fileUri,omitempty"`
 }
 
+// UnmarshalJSON supports snake_case and camelCase for MimeType / FileUri.
+func (g *GeminiFileData) UnmarshalJSON(data []byte) error {
+	type Alias GeminiFileData
+	var aux struct {
+		Alias
+		MimeTypeSnake string `json:"mime_type"`
+		FileUriSnake  string `json:"file_uri"`
+	}
+	if err := common.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*g = GeminiFileData(aux.Alias)
+	if aux.MimeTypeSnake != "" {
+		g.MimeType = aux.MimeTypeSnake
+	} else if aux.MimeType != "" {
+		g.MimeType = aux.MimeType
+	}
+	if aux.FileUriSnake != "" {
+		g.FileUri = aux.FileUriSnake
+	} else if aux.FileUri != "" {
+		g.FileUri = aux.FileUri
+	}
+	return nil
+}
+
 type GeminiPart struct {
 	Text             string                  `json:"text,omitempty"`
 	Thought          bool                    `json:"thought,omitempty"`
@@ -284,13 +316,14 @@ type GeminiPart struct {
 	CodeExecutionResult *GeminiPartCodeExecutionResult `json:"codeExecutionResult,omitempty"`
 }
 
-// UnmarshalJSON custom unmarshaler for GeminiPart to support snake_case and camelCase for InlineData
+// UnmarshalJSON custom unmarshaler for GeminiPart to support snake_case and camelCase for InlineData / FileData
 func (p *GeminiPart) UnmarshalJSON(data []byte) error {
 	// Alias to avoid recursion during unmarshalling
 	type Alias GeminiPart
 	var aux struct {
 		Alias
 		InlineDataSnake *GeminiInlineData `json:"inline_data,omitempty"` // snake_case variant
+		FileDataSnake   *GeminiFileData   `json:"file_data,omitempty"`   // snake_case variant
 	}
 
 	if err := common.Unmarshal(data, &aux); err != nil {
@@ -306,7 +339,11 @@ func (p *GeminiPart) UnmarshalJSON(data []byte) error {
 	} else if aux.InlineData != nil { // Fallback to camelCase from Alias
 		p.InlineData = aux.InlineData
 	}
-	// Other fields like Text, FunctionCall etc. are already populated via aux.Alias
+	if aux.FileDataSnake != nil {
+		p.FileData = aux.FileDataSnake
+	} else if aux.FileData != nil {
+		p.FileData = aux.FileData
+	}
 
 	return nil
 }

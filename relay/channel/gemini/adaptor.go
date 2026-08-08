@@ -37,23 +37,71 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
-	if len(request.Contents) > 0 {
-		for i, content := range request.Contents {
-			if i == 0 {
-				if request.Contents[0].Role == "" {
-					request.Contents[0].Role = "user"
-				}
-			}
-			for _, part := range content.Parts {
-				if part.FileData != nil {
-					if part.FileData.MimeType == "" && strings.Contains(part.FileData.FileUri, "www.youtube.com") {
-						part.FileData.MimeType = "video/webm"
-					}
-				}
+	if len(request.Contents) == 0 {
+		return request, nil
+	}
+	for i := range request.Contents {
+		if i == 0 && request.Contents[i].Role == "" {
+			request.Contents[i].Role = "user"
+		}
+		for j := range request.Contents[i].Parts {
+			if err := resolveGeminiImageURL(c, &request.Contents[i].Parts[j]); err != nil {
+				return nil, err
 			}
 		}
 	}
 	return request, nil
+}
+
+// resolveGeminiImageURL 智能兼容 Gemini 图片 URL：
+// - inlineData.url（网关 S3 字段）→ 下载为 inlineData.data，并去掉非官方 url
+// - fileData 为 Gemini 原生 URI → 保留 fileData（YouTube 补 mime）
+// - fileData 为普通 http(s) 图片 URL → 下载为 inlineData（对代理/上游更稳定）
+func resolveGeminiImageURL(c *gin.Context, part *dto.GeminiPart) error {
+	if part == nil {
+		return nil
+	}
+
+	if part.InlineData != nil {
+		// 网关回传场景：只有 url、没有 data
+		if part.InlineData.Data == "" && part.InlineData.Url != "" {
+			source := types.NewFileSourceFromData(part.InlineData.Url, part.InlineData.MimeType)
+			inlineData, err := geminiInlineDataFromSource(c, source, "resolve gemini inlineData.url")
+			if err != nil {
+				return err
+			}
+			part.InlineData = inlineData
+		} else if part.InlineData.Url != "" {
+			// 已有 data 时仍去掉非官方 url，避免透传给上游
+			part.InlineData.Url = ""
+		}
+	}
+
+	if part.FileData == nil {
+		return nil
+	}
+	uri := strings.TrimSpace(part.FileData.FileUri)
+	if uri == "" {
+		return nil
+	}
+
+	if isGeminiNativeFileURI(uri) {
+		if part.FileData.MimeType == "" && isYouTubeURI(uri) {
+			part.FileData.MimeType = "video/webm"
+		}
+		return nil
+	}
+
+	if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+		source := types.NewURLFileSource(uri)
+		inlineData, err := geminiInlineDataFromSource(c, source, "resolve gemini fileData url")
+		if err != nil {
+			return err
+		}
+		part.InlineData = inlineData
+		part.FileData = nil
+	}
+	return nil
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.ClaudeRequest) (any, error) {
