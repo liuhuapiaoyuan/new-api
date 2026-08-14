@@ -18,17 +18,27 @@ import (
 )
 
 func applyExplicitLogTextFilter(tx *gorm.DB, column string, value string) (*gorm.DB, error) {
-	if value == "" {
+	condition, arg, err := buildLogTextFilter(column, value)
+	if err != nil {
+		return nil, err
+	}
+	if condition == "" {
 		return tx, nil
 	}
-	if strings.Contains(value, "%") {
-		condition, pattern, err := buildLogLikeCondition(column, value)
-		if err != nil {
-			return nil, err
-		}
-		return tx.Where(condition, pattern), nil
+	return tx.Where(condition, arg), nil
+}
+
+func buildLogTextFilter(column string, value string) (string, string, error) {
+	if value == "" {
+		return "", "", nil
 	}
-	return tx.Where(column+" = ?", value), nil
+	if !strings.Contains(value, "%") && len(value) >= 2 {
+		value = "%" + value + "%"
+	}
+	if strings.Contains(value, "%") {
+		return buildLogLikeCondition(column, value)
+	}
+	return column + " = ?", value, nil
 }
 
 func buildLogLikeCondition(column string, value string) (string, string, error) {
@@ -665,17 +675,24 @@ type Stat struct {
 	Tpm   int `json:"tpm"`
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
+func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, userId int) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
 
 	// 为rpm和tpm创建单独的查询
 	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
 
-	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
-		return stat, err
-	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "username", username); err != nil {
-		return stat, err
+	// Self-stat must scope by user_id. Username is only an admin search filter;
+	// applying LIKE to the current account name would leak other users' totals.
+	if userId != 0 {
+		tx = tx.Where("user_id = ?", userId)
+		rpmTpmQuery = rpmTpmQuery.Where("user_id = ?", userId)
+	} else {
+		if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
+			return stat, err
+		}
+		if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "username", username); err != nil {
+			return stat, err
+		}
 	}
 	if tokenName != "" {
 		tx = tx.Where("token_name = ?", tokenName)

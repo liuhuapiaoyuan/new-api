@@ -162,6 +162,9 @@ const ExportLogsModal = ({
           </div>
         ))}
       </div>
+      <p className='text-xs mt-3' style={{ color: 'var(--semi-color-text-2)' }}>
+        {t('单次最多导出 50 万条，超出部分请缩小时间范围后分批导出')}
+      </p>
     </Modal>
   );
 };

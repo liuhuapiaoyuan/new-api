@@ -79,7 +79,7 @@ const LogsFilters = ({
           <Form.Input
             field='model_name'
             prefix={<IconSearch />}
-            placeholder={t('模型名称')}
+            placeholder={t('搜索模型名称')}
             showClear
             pure
             size='small'
@@ -116,7 +116,7 @@ const LogsFilters = ({
               <Form.Input
                 field='username'
                 prefix={<IconSearch />}
-                placeholder={t('用户名称')}
+                placeholder={t('搜索用户名称')}
                 showClear
                 pure
                 size='small'

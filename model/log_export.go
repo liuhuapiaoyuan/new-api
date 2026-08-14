@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -12,29 +13,46 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/types"
+
+	"gorm.io/gorm"
 )
 
 // Usage log CSV export limits and column keys (aligned with web COLUMN_KEYS).
 const (
-	LogExportMaxRows   int64 = 50000
-	LogExportBatchSize int   = 1000
-	LogExportMaxDetailRunes int = 4096
+	defaultLogExportMaxRows = 500000
+	LogExportBatchSize      = 1000
+	LogExportMaxDetailRunes = 4096
 
-	LogExportColTime        = "time"
-	LogExportColChannel     = "channel"
-	LogExportColUsername    = "username"
-	LogExportColToken       = "token"
-	LogExportColGroup       = "group"
-	LogExportColType        = "type"
-	LogExportColModel       = "model"
-	LogExportColUseTime     = "use_time"
-	LogExportColPrompt      = "prompt"
-	LogExportColCompletion  = "completion"
-	LogExportColCost        = "cost"
-	LogExportColRetry       = "retry"
-	LogExportColIP          = "ip"
-	LogExportColDetails     = "details"
+	LogExportColTime       = "time"
+	LogExportColChannel    = "channel"
+	LogExportColUsername   = "username"
+	LogExportColToken      = "token"
+	LogExportColGroup      = "group"
+	LogExportColType       = "type"
+	LogExportColModel      = "model"
+	LogExportColUseTime    = "use_time"
+	LogExportColPrompt     = "prompt"
+	LogExportColCompletion = "completion"
+	LogExportColCost       = "cost"
+	LogExportColRetry      = "retry"
+	LogExportColIP         = "ip"
+	LogExportColDetails    = "details"
 )
+
+// LogExportMaxRows is the per-download safety cap. Override with LOG_EXPORT_MAX_ROWS.
+func LogExportMaxRows() int64 {
+	n := common.GetEnvOrDefault("LOG_EXPORT_MAX_ROWS", defaultLogExportMaxRows)
+	if n <= 0 {
+		return defaultLogExportMaxRows
+	}
+	return int64(n)
+}
+
+func flushLogExport(w io.Writer) {
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
 
 var (
 	ErrLogExportNoColumns = errors.New("no export columns selected")
@@ -117,211 +135,105 @@ func DefaultUserLogExportColumns() []string {
 	return out
 }
 
-// CountTokenLogsForExport counts logs for a user's token within an optional time/type window.
-func CountTokenLogsForExport(userId int, tokenId int, logType int, startTimestamp int64, endTimestamp int64) (int64, error) {
-	tx := buildTokenLogFilterTx(userId, tokenId, logType, startTimestamp, endTimestamp)
-	var total int64
-	err := tx.Model(&Log{}).Count(&total).Error
-	return total, err
+func logExportOrderClause() string {
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return clickHouseLogOrder("logs.")
+	}
+	return "logs.id desc"
 }
 
-// WriteTokenUsageLogsCSV writes CSV for one token's usage logs. Enforce row limit in the controller first.
-func WriteTokenUsageLogsCSV(w io.Writer, total int64, userId int, tokenId int, logType int, startTimestamp int64, endTimestamp int64, columns []string) error {
-	if len(columns) == 0 {
-		return ErrLogExportNoColumns
+func applyLogExportCursor(tx *gorm.DB, last *Log) *gorm.DB {
+	if last == nil {
+		return tx
 	}
-	if total == 0 {
-		return writeLogsCSVHeaderOnly(w, columns)
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return tx.Where(
+			"(logs.created_at < ?) OR (logs.created_at = ? AND logs.request_id < ?)",
+			last.CreatedAt, last.CreatedAt, last.RequestId,
+		)
 	}
-	if _, err := w.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-		return err
+	if last.Id > 0 {
+		return tx.Where("logs.id < ?", last.Id)
 	}
-	cw := csv.NewWriter(w)
-	header := make([]string, len(columns))
-	for i, col := range columns {
-		if h, ok := logExportHeaderZH[col]; ok {
-			header[i] = h
-		} else {
-			header[i] = col
-		}
-	}
-	if err := cw.Write(header); err != nil {
-		return err
-	}
+	return tx
+}
 
-	var lastID int
-	for {
-		tx := buildTokenLogFilterTx(userId, tokenId, logType, startTimestamp, endTimestamp)
-		if lastID > 0 {
-			tx = tx.Where("logs.id < ?", lastID)
-		}
-		var batch []*Log
-		if err := tx.Order("logs.id desc").Limit(LogExportBatchSize).Find(&batch).Error; err != nil {
-			return err
-		}
-		if len(batch) == 0 {
-			break
+func queryLogExportBatch(tx *gorm.DB, last *Log, limit int) ([]*Log, error) {
+	tx = applyLogExportCursor(tx, last)
+	var batch []*Log
+	if err := tx.Order(logExportOrderClause()).Limit(limit).Find(&batch).Error; err != nil {
+		return nil, err
+	}
+	return batch, nil
+}
+
+func logExportCursorStuck(prev *Log, next *Log) bool {
+	if prev == nil || next == nil {
+		return false
+	}
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return prev.CreatedAt == next.CreatedAt && prev.RequestId == next.RequestId
+	}
+	return prev.Id == next.Id
+}
+
+// WriteTokenUsageLogsCSV writes CSV for one token's usage logs, up to LogExportMaxRows.
+func WriteTokenUsageLogsCSV(w io.Writer, userId int, tokenId int, logType int, startTimestamp int64, endTimestamp int64, columns []string) error {
+	return streamLogsCSV(w, columns, false, func(last *Log, limit int) ([]*Log, error) {
+		batch, err := queryLogExportBatch(buildTokenLogFilterTx(userId, tokenId, logType, startTimestamp, endTimestamp), last, limit)
+		if err != nil {
+			return nil, err
 		}
 		if err := fillTokenNamesForLogs(batch); err != nil {
-			return err
+			return nil, err
 		}
-		for _, log := range batch {
-			row := buildLogCSVRow(log, columns, false)
-			if err := cw.Write(row); err != nil {
-				return err
-			}
-		}
-		cw.Flush()
-		if err := cw.Error(); err != nil {
-			return err
-		}
-		lastID = batch[len(batch)-1].Id
-	}
-	return nil
+		return batch, nil
+	})
 }
 
-// CountAdminLogsForExport counts rows matching admin log filters (no pagination cap).
-func CountAdminLogsForExport(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, requestId string) (int64, error) {
-	tx, err := buildAdminLogFilterTx(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, "")
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	err = tx.Model(&Log{}).Count(&total).Error
-	return total, err
-}
-
-// CountUserLogsForExport counts rows matching self log filters (full count, not capped at logSearchCountLimit).
-func CountUserLogsForExport(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, group string, requestId string) (int64, error) {
-	tx, err := buildUserLogFilterTx(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, "")
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	err = tx.Model(&Log{}).Count(&total).Error
-	return total, err
-}
-
-// WriteAdminUsageLogsCSV writes CSV with UTF-8 BOM. Call CountAdminLogsForExport and enforce LogExportMaxRows in the controller before invoking. total must match the same filters.
-func WriteAdminUsageLogsCSV(w io.Writer, total int64, logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, requestId string, columns []string) error {
-	if len(columns) == 0 {
-		return ErrLogExportNoColumns
-	}
-	if total == 0 {
-		return writeLogsCSVHeaderOnly(w, columns)
-	}
-	if _, err := w.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-		return err
-	}
-	cw := csv.NewWriter(w)
-	header := make([]string, len(columns))
-	for i, col := range columns {
-		if h, ok := logExportHeaderZH[col]; ok {
-			header[i] = h
-		} else {
-			header[i] = col
-		}
-	}
-	if err := cw.Write(header); err != nil {
-		return err
-	}
-
-	var lastID int
-	for {
+// WriteAdminUsageLogsCSV writes CSV with UTF-8 BOM, streaming up to LogExportMaxRows.
+func WriteAdminUsageLogsCSV(w io.Writer, logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, requestId string, columns []string) error {
+	return streamLogsCSV(w, columns, true, func(last *Log, limit int) ([]*Log, error) {
 		tx, err := buildAdminLogFilterTx(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, "")
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if lastID > 0 {
-			tx = tx.Where("logs.id < ?", lastID)
-		}
-		var batch []*Log
-		if err := tx.Order("logs.id desc").Limit(LogExportBatchSize).Find(&batch).Error; err != nil {
-			return err
-		}
-		if len(batch) == 0 {
-			break
+		batch, err := queryLogExportBatch(tx, last, limit)
+		if err != nil {
+			return nil, err
 		}
 		if err := fillLogChannelNames(batch); err != nil {
-			return err
+			return nil, err
 		}
 		if err := fillTokenNamesForLogs(batch); err != nil {
-			return err
+			return nil, err
 		}
-		for _, log := range batch {
-			row := buildLogCSVRow(log, columns, true)
-			if err := cw.Write(row); err != nil {
-				return err
-			}
-		}
-		cw.Flush()
-		if err := cw.Error(); err != nil {
-			return err
-		}
-		lastID = batch[len(batch)-1].Id
-	}
-	return nil
+		return batch, nil
+	})
 }
 
-// WriteUserUsageLogsCSV writes CSV for the current user's logs. Enforce row limit in the controller using CountUserLogsForExport.
-func WriteUserUsageLogsCSV(w io.Writer, total int64, userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, group string, requestId string, columns []string) error {
+// WriteUserUsageLogsCSV writes CSV for the current user's logs, streaming up to LogExportMaxRows.
+func WriteUserUsageLogsCSV(w io.Writer, userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, group string, requestId string, columns []string) error {
+	return streamLogsCSV(w, columns, false, func(last *Log, limit int) ([]*Log, error) {
+		tx, err := buildUserLogFilterTx(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, "")
+		if err != nil {
+			return nil, err
+		}
+		batch, err := queryLogExportBatch(tx, last, limit)
+		if err != nil {
+			return nil, err
+		}
+		if err := fillTokenNamesForLogs(batch); err != nil {
+			return nil, err
+		}
+		return batch, nil
+	})
+}
+
+func streamLogsCSV(w io.Writer, columns []string, isAdmin bool, fetch func(last *Log, limit int) ([]*Log, error)) error {
 	if len(columns) == 0 {
 		return ErrLogExportNoColumns
 	}
-	if total == 0 {
-		return writeLogsCSVHeaderOnly(w, columns)
-	}
-	if _, err := w.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-		return err
-	}
-	cw := csv.NewWriter(w)
-	header := make([]string, len(columns))
-	for i, col := range columns {
-		if h, ok := logExportHeaderZH[col]; ok {
-			header[i] = h
-		} else {
-			header[i] = col
-		}
-	}
-	if err := cw.Write(header); err != nil {
-		return err
-	}
-
-	var lastID int
-	for {
-		tx, err := buildUserLogFilterTx(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, "")
-		if err != nil {
-			return err
-		}
-		if lastID > 0 {
-			tx = tx.Where("logs.id < ?", lastID)
-		}
-		var batch []*Log
-		if err := tx.Order("logs.id desc").Limit(LogExportBatchSize).Find(&batch).Error; err != nil {
-			return err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		if err := fillTokenNamesForLogs(batch); err != nil {
-			return err
-		}
-		for _, log := range batch {
-			row := buildLogCSVRow(log, columns, false)
-			if err := cw.Write(row); err != nil {
-				return err
-			}
-		}
-		cw.Flush()
-		if err := cw.Error(); err != nil {
-			return err
-		}
-		lastID = batch[len(batch)-1].Id
-	}
-	return nil
-}
-
-func writeLogsCSVHeaderOnly(w io.Writer, columns []string) error {
 	if _, err := w.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
 		return err
 	}
@@ -338,7 +250,47 @@ func writeLogsCSVHeaderOnly(w io.Writer, columns []string) error {
 		return err
 	}
 	cw.Flush()
-	return cw.Error()
+	if err := cw.Error(); err != nil {
+		return err
+	}
+	flushLogExport(w)
+
+	maxRows := LogExportMaxRows()
+	var written int64
+	var last *Log
+	for written < maxRows {
+		limit := LogExportBatchSize
+		remain := maxRows - written
+		if remain < int64(limit) {
+			limit = int(remain)
+		}
+		batch, err := fetch(last, limit)
+		if err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		if logExportCursorStuck(last, batch[0]) {
+			break
+		}
+		for _, log := range batch {
+			if err := cw.Write(buildLogCSVRow(log, columns, isAdmin)); err != nil {
+				return err
+			}
+		}
+		cw.Flush()
+		if err := cw.Error(); err != nil {
+			return err
+		}
+		flushLogExport(w)
+		written += int64(len(batch))
+		last = batch[len(batch)-1]
+		if len(batch) < limit {
+			break
+		}
+	}
+	return nil
 }
 
 func fillTokenNamesForLogs(logs []*Log) error {

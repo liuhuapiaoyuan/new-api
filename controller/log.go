@@ -77,26 +77,12 @@ func ExportAdminUsageLogsCSV(c *gin.Context) {
 		return
 	}
 
-	total, err := model.CountAdminLogsForExport(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if total > model.LogExportMaxRows {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("导出行数超过上限（%d），请缩小时间范围或筛选条件", model.LogExportMaxRows),
-		})
-		return
-	}
-
 	filename := fmt.Sprintf("usage-logs-%s.csv", time.Now().Format("20060102-150405"))
-	c.Header("Content-Type", "text/csv; charset=utf-8")
-	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	writeUsageLogsCSVHeaders(c, filename)
 
-	err = model.WriteAdminUsageLogsCSV(c.Writer, total, logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, columns)
+	err := model.WriteAdminUsageLogsCSV(c.Writer, logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, columns)
 	if err != nil {
-		common.ApiError(c, err)
+		common.SysError("export admin usage logs csv: " + err.Error())
 		return
 	}
 }
@@ -120,28 +106,21 @@ func ExportUserUsageLogsCSV(c *gin.Context) {
 		return
 	}
 
-	total, err := model.CountUserLogsForExport(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if total > model.LogExportMaxRows {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("导出行数超过上限（%d），请缩小时间范围或筛选条件", model.LogExportMaxRows),
-		})
-		return
-	}
-
 	filename := fmt.Sprintf("usage-logs-self-%s.csv", time.Now().Format("20060102-150405"))
+	writeUsageLogsCSVHeaders(c, filename)
+
+	err := model.WriteUserUsageLogsCSV(c.Writer, userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, columns)
+	if err != nil {
+		common.SysError("export user usage logs csv: " + err.Error())
+		return
+	}
+}
+
+func writeUsageLogsCSVHeaders(c *gin.Context, filename string) {
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-
-	err = model.WriteUserUsageLogsCSV(c.Writer, total, userId, logType, startTimestamp, endTimestamp, modelName, tokenName, group, requestId, columns)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
+	c.Header("X-Accel-Buffering", "no")
+	c.Header("Cache-Control", "no-store")
 }
 
 // Deprecated: SearchAllLogs 已废弃，前端未使用该接口。
@@ -193,7 +172,7 @@ func GetLogsStat(c *gin.Context) {
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
-	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, 0)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -212,7 +191,7 @@ func GetLogsStat(c *gin.Context) {
 }
 
 func GetLogsSelfStat(c *gin.Context) {
-	username := c.GetString("username")
+	userId := c.GetInt("id")
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
@@ -220,7 +199,7 @@ func GetLogsSelfStat(c *gin.Context) {
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
-	quotaNum, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	quotaNum, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, "", tokenName, channel, group, userId)
 	if err != nil {
 		common.ApiError(c, err)
 		return

@@ -257,7 +257,7 @@ export function ExportReportDialog() {
 
         <p className='text-muted-foreground text-xs leading-relaxed'>
           {t(
-            'Exports up to 50,000 rows. Narrow the time range if the export is too large.'
+            'Exports up to 500,000 rows. Narrow the time range if you need a smaller file.'
           )}
         </p>
       </div>

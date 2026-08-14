@@ -398,27 +398,13 @@ func ExportTokenUsageLogsCSV(c *gin.Context) {
 		columns = model.DefaultUserLogExportColumns()
 	}
 
-	total, err := model.CountTokenLogsForExport(userId, token.Id, logType, startTimestamp, endTimestamp)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if total > model.LogExportMaxRows {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("导出行数超过上限（%d），请缩小时间范围", model.LogExportMaxRows),
-		})
-		return
-	}
-
 	safeName := sanitizeTokenExportFilename(token.Name)
 	filename := fmt.Sprintf("token-%s-usage-%s.csv", safeName, time.Now().Format("20060102-150405"))
-	c.Header("Content-Type", "text/csv; charset=utf-8")
-	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	writeUsageLogsCSVHeaders(c, filename)
 
-	err = model.WriteTokenUsageLogsCSV(c.Writer, total, userId, token.Id, logType, startTimestamp, endTimestamp, columns)
+	err = model.WriteTokenUsageLogsCSV(c.Writer, userId, token.Id, logType, startTimestamp, endTimestamp, columns)
 	if err != nil {
-		common.ApiError(c, err)
+		common.SysError("export token usage logs csv: " + err.Error())
 		return
 	}
 }

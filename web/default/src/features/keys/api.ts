@@ -182,6 +182,7 @@ export async function exportApiKeyUsageReport(
       skipBusinessError: true,
       skipErrorHandler: true,
       disableDuplicate: true,
+      timeout: 0,
     })
 
     const blob = res.data as Blob

@@ -859,6 +859,7 @@ export const useLogsData = () => {
         responseType: 'blob',
         disableDuplicate: true,
         skipErrorHandler: true,
+        timeout: 0,
       });
       const blob = res.data;
       const ctype = (res.headers['content-type'] || '').toLowerCase();
